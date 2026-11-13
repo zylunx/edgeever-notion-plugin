@@ -18,7 +18,6 @@
 import type { NotionClient } from "./client";
 import type { PluginContext, PluginSettings, PropertyNames } from "../types";
 import { NotionError } from "./client";
-import { resolveDataSourceId } from "./data-sources";
 import { loadSetupRecord, saveSetupRecord, type SetupRecord } from "../sync/setup-store";
 import { errMsg, nowIso, redact } from "../util";
 
@@ -52,21 +51,27 @@ export interface SetupResult {
   message: string;
 }
 
-/** 属性 schema（propertyConfigurationRequest）。属性名由设置决定，空名跳过，重名去重。 */
+/**
+ * 属性 schema（propertyConfigurationRequest）。属性名固定，空名跳过，重名去重。
+ *
+ * Notion 公开 API 不提供「隐藏视图列」的能力（OpenAPI 的 initialDataSourceRequest
+ * 只有 properties，没有 visible/hidden 字段，也没有 view 配置端点），因此这里只创建
+ * 用户可见列 + 幂等必需的 EdgeEver ID；Content Hash / Sync Status / Notebook ID
+ * 等技术列不再创建，双基线 Hash 与同步状态仍完整保存在本地 context.storage。
+ */
 export function desiredProperties(props: PropertyNames): Record<string, PropertyConfig> {
   const out: Record<string, PropertyConfig> = {};
   const put = (name: string, config: PropertyConfig): void => {
     const key = name.trim();
     if (key && !(key in out)) out[key] = config;
   };
+  // 用户可见列在前，内部幂等键放最后。
   put(props.name, { title: {} });
-  put(props.edgeeverId, { rich_text: {} });
-  put(props.notebookId, { rich_text: {} });
   put(props.tags, { multi_select: { options: [] } });
-  put(props.contentHash, { rich_text: {} });
-  put(props.lastSynced, { date: {} });
-  put(props.syncStatus, { select: { options: [] } });
+  put(props.notebook, { select: { options: [] } });
   put(props.edgeeverUpdated, { date: {} });
+  put(props.lastSynced, { date: {} });
+  put(props.edgeeverId, { rich_text: {} });
   return out;
 }
 
@@ -138,20 +143,12 @@ export async function ensureSyncDatabase(
   const desired = desiredProperties(settings.props);
   const previous = await loadSetupRecord(ctx);
   let created = false;
-  let saveRecord = true;
-  let usedManualTarget = false;
   let databaseId = "";
   let dataSourceId = "";
   let databaseUrl: string | undefined;
   let parentPageId = "";
 
-  if (settings.dataSourceIdSource === "manual") {
-    // 用户在设置里手写了目标：只校验并补齐属性，不新建、不写入自动生成记录。
-    usedManualTarget = true;
-    saveRecord = false;
-    dataSourceId = settings.dataSourceId || (await resolveDataSourceId(client, settings));
-    databaseId = settings.databaseId;
-  } else if (previous) {
+  if (previous) {
     // 幂等：已生成过，先确认仍可访问。不可访问时不自动新建，避免产生重复数据库。
     try {
       await client.request<DataSourceSchema>(
@@ -245,17 +242,16 @@ export async function ensureSyncDatabase(
     createdAt: previous?.createdAt || nowIso(),
     propertyNames: Object.keys(desired),
   };
-  if (saveRecord) await saveSetupRecord(ctx, record);
+  await saveSetupRecord(ctx, record);
 
   const parts: string[] = [];
   parts.push(
-    usedManualTarget
-      ? "检测到设置里手动指定的 Data Source，未新建数据库。"
-      : created
-        ? `已在父页面下创建同步数据库「${DEFAULT_DATABASE_TITLE}」，Data Source ID 已自动保存，无需手动复制。`
-        : "已检测到此前生成的同步数据库，未重复创建。",
+    created
+      ? `已在父页面下创建同步数据库「${DEFAULT_DATABASE_TITLE}」，Data Source ID 已自动保存，无需手动复制。默认只展示标题、标签、笔记本、时间与同步时间。`
+      : "已检测到此前生成的同步数据库，未重复创建。",
   );
   parts.push(addedProperties.length ? `新增属性：${addedProperties.join("、")}。` : "所需属性已齐全。");
+  parts.push("Hash、同步状态等技术字段只保留在本地，不再写入 Notion 表格。");
   if (mismatchedProperties.length) {
     parts.push(`以下属性类型不匹配，插件不会自动修改，请手动调整：${mismatchedProperties.join("；")}。`);
   }

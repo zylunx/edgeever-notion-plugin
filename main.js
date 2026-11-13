@@ -37,10 +37,6 @@ function asBool(v, dflt = false) {
   if (typeof v === "number") return v !== 0;
   return dflt;
 }
-function asNumber(v, dflt) {
-  const n = typeof v === "number" ? v : Number.parseFloat(String(v ?? ""));
-  return Number.isFinite(n) ? n : dflt;
-}
 function escapeHtml(v) {
   return asString(v).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
@@ -249,7 +245,9 @@ var STORAGE_KEYS = {
   report: "notion-sync:last-report",
   state: "notion-sync:state",
   pending: "notion-sync:pending",
-  setup: "notion-sync:setup"
+  setup: "notion-sync:setup",
+  /** 面板里选中的笔记本（单个或多个）；空数组 = 同步全部笔记本。不暴露在设置界面。 */
+  notebooks: "notion-sync:notebooks"
 };
 function asRecord(value) {
   if (value && typeof value === "object" && !Array.isArray(value)) return value;
@@ -306,6 +304,13 @@ async function addPending(ctx, noteIds) {
 async function clearPending(ctx) {
   await ctx.storage.set(STORAGE_KEYS.pending, []);
 }
+async function loadNotebookSelection(ctx) {
+  const raw = await ctx.storage.get(STORAGE_KEYS.notebooks);
+  return Array.isArray(raw) ? raw.map(String).filter(Boolean) : [];
+}
+async function saveNotebookSelection(ctx, ids) {
+  await ctx.storage.set(STORAGE_KEYS.notebooks, Array.from(new Set(ids)).filter(Boolean));
+}
 
 // src/sync/setup-store.ts
 var KEY = `${STORAGE_KEYS.setup}`;
@@ -339,15 +344,13 @@ var SETTINGS_DEFAULTS = {
   uploadAttachments: false,
   maxAttachmentMB: 5
 };
-var DEFAULT_PROPS = {
+var FIXED_PROPS = {
   name: "Name",
-  edgeeverId: "EdgeEver ID",
-  notebookId: "EdgeEver Notebook ID",
   tags: "Tags",
-  contentHash: "Content Hash",
+  notebook: "Notebook",
+  edgeeverUpdated: "EdgeEver Updated At",
   lastSynced: "Last Synced",
-  syncStatus: "Sync Status",
-  edgeeverUpdated: "EdgeEver Updated At"
+  edgeeverId: "EdgeEver ID"
 };
 async function loadSettings(ctx) {
   const get = async (key) => {
@@ -363,52 +366,32 @@ async function loadSettings(ctx) {
   } catch {
   }
   if (!token) token = asString(await get("notion-token"), "").trim();
-  const mdRaw = asString(await get("markdown-version"), SETTINGS_DEFAULTS.markdownVersion);
+  const generated = await loadSetupRecord(ctx);
   const dirRaw = asString(await get("sync-direction"), SETTINGS_DEFAULTS.direction);
-  const manualDataSourceId = asString(await get("notion-data-source-id"), "").trim();
-  const manualDatabaseId = asString(await get("notion-database-id"), "").trim();
-  const generated = !manualDataSourceId && !manualDatabaseId ? await loadSetupRecord(ctx) : void 0;
-  const props = {
-    name: asString(await get("prop-name"), DEFAULT_PROPS.name).trim() || DEFAULT_PROPS.name,
-    edgeeverId: asString(await get("prop-edgeever-id"), DEFAULT_PROPS.edgeeverId).trim() || DEFAULT_PROPS.edgeeverId,
-    notebookId: asString(await get("prop-notebook-id"), DEFAULT_PROPS.notebookId).trim(),
-    tags: asString(await get("prop-tags"), DEFAULT_PROPS.tags).trim(),
-    contentHash: asString(await get("prop-content-hash"), DEFAULT_PROPS.contentHash).trim(),
-    lastSynced: asString(await get("prop-last-synced"), DEFAULT_PROPS.lastSynced).trim(),
-    syncStatus: asString(await get("prop-sync-status"), DEFAULT_PROPS.syncStatus).trim(),
-    edgeeverUpdated: asString(await get("prop-edgeever-updated"), DEFAULT_PROPS.edgeeverUpdated).trim()
-  };
   return {
     token,
-    databaseId: manualDatabaseId,
-    dataSourceId: manualDataSourceId || generated?.dataSourceId || "",
-    dataSourceIdSource: manualDataSourceId || manualDatabaseId ? "manual" : generated ? "generated" : "none",
+    dataSourceId: generated?.dataSourceId ?? "",
+    dataSourceIdSource: generated ? "generated" : "none",
+    databaseId: generated?.databaseId ?? "",
     parentPageId: asString(await get("notion-parent-page-id"), "").trim(),
-    apiBaseUrl: asString(await get("api-base-url"), SETTINGS_DEFAULTS.apiBaseUrl).trim().replace(/\/+$/, "") || SETTINGS_DEFAULTS.apiBaseUrl,
-    notionVersion: asString(await get("notion-version"), SETTINGS_DEFAULTS.notionVersion).trim() || SETTINGS_DEFAULTS.notionVersion,
-    markdownVersion: mdRaw === "v1" ? "v1" : "v2",
-    notebookId: asString(await get("sync-notebook-id"), "").trim(),
+    apiBaseUrl: SETTINGS_DEFAULTS.apiBaseUrl,
+    notionVersion: SETTINGS_DEFAULTS.notionVersion,
+    markdownVersion: SETTINGS_DEFAULTS.markdownVersion,
+    notebookIds: await loadNotebookSelection(ctx),
     direction: dirRaw === "push" || dirRaw === "pull" ? dirRaw : "bidirectional",
-    props,
+    props: FIXED_PROPS,
     autoSync: asBool(await get("auto-sync"), SETTINGS_DEFAULTS.autoSync),
-    autoSyncDelaySec: Math.max(5, asNumber(await get("auto-sync-delay-sec"), SETTINGS_DEFAULTS.autoSyncDelaySec)),
+    autoSyncDelaySec: SETTINGS_DEFAULTS.autoSyncDelaySec,
     uploadAttachments: asBool(await get("upload-attachments"), SETTINGS_DEFAULTS.uploadAttachments),
-    maxAttachmentMB: Math.max(0.1, asNumber(await get("max-attachment-mb"), SETTINGS_DEFAULTS.maxAttachmentMB))
+    maxAttachmentMB: SETTINGS_DEFAULTS.maxAttachmentMB
   };
 }
 function validateSettings(s) {
   if (!s.token) return "\u8BF7\u5148\u5728\u63D2\u4EF6\u8BBE\u7F6E\u4E2D\u586B\u5199 Notion Integration Token\uFF08secret \u5B57\u6BB5\uFF09";
-  if (!s.dataSourceId && !s.databaseId) {
-    return "\u8BF7\u5148\u70B9\u51FB\u540C\u6B65\u9762\u677F\u7684\u300C\u4E00\u952E\u751F\u6210\u540C\u6B65\u6570\u636E\u5E93\u300D\uFF08\u9700\u5148\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199 Notion \u7236\u9875\u9762 ID\uFF09\uFF0C\u6216\u624B\u52A8\u586B\u5199 Data Source ID / \u6570\u636E\u5E93 ID";
+  if (!s.dataSourceId) {
+    return "\u8BF7\u5148\u70B9\u51FB\u300C\u4E00\u952E\u751F\u6210\u540C\u6B65\u6570\u636E\u5E93\u300D\uFF08\u9700\u5148\u5728\u8BBE\u7F6E\u4E2D\u586B\u5199 Notion \u7236\u9875\u9762 ID\uFF09\uFF1BData Source ID \u4F1A\u7531\u63D2\u4EF6\u81EA\u52A8\u4FDD\u5B58\uFF0C\u65E0\u9700\u624B\u52A8\u586B\u5199";
   }
-  if (!/^https:\/\//i.test(s.apiBaseUrl) && !/^http:\/\/localhost/i.test(s.apiBaseUrl)) {
-    return "API \u57FA\u7840\u5730\u5740\u5FC5\u987B\u4F7F\u7528 https\uFF08\u672C\u5730\u8C03\u8BD5\u53EF\u7528 http://localhost\uFF09";
-  }
-  if (!s.notebookId) return "\u8BF7\u5148\u5728\u540C\u6B65\u9762\u677F\u4E2D\u9009\u62E9\u8981\u540C\u6B65\u7684 EdgeEver \u7B14\u8BB0\u672C";
   return null;
-}
-function isCustomApiBase(s) {
-  return s.apiBaseUrl.replace(/\/+$/, "") !== SETTINGS_DEFAULTS.apiBaseUrl;
 }
 
 // src/notion/data-sources.ts
@@ -487,13 +470,11 @@ function propMap(s, input) {
   const out = {};
   if (input.title !== void 0 && p.name) out[p.name] = { title: richText(input.title) };
   if (input.edgeeverId !== void 0 && p.edgeeverId) out[p.edgeeverId] = { rich_text: richText(input.edgeeverId) };
-  if (input.notebookId !== void 0 && p.notebookId) out[p.notebookId] = { rich_text: richText(input.notebookId) };
-  if (input.contentHash !== void 0 && p.contentHash) out[p.contentHash] = { rich_text: richText(input.contentHash) };
+  if (input.notebookName && p.notebook) {
+    out[p.notebook] = { select: { name: input.notebookName.slice(0, 100) } };
+  }
   if (input.tags !== void 0 && p.tags) {
     out[p.tags] = { multi_select: input.tags.slice(0, 100).map((name) => ({ name })) };
-  }
-  if (input.syncStatus !== void 0 && p.syncStatus) {
-    out[p.syncStatus] = { select: { name: input.syncStatus } };
   }
   if (input.lastSynced !== void 0 && p.lastSynced) out[p.lastSynced] = { date: { start: input.lastSynced } };
   if (input.edgeeverUpdated !== void 0 && p.edgeeverUpdated) {
@@ -550,6 +531,9 @@ function readTags(prop) {
   if (!prop?.multi_select) return [];
   return prop.multi_select.map((o) => o.name ?? "").filter(Boolean);
 }
+function readNotebookName(prop) {
+  return prop?.select?.name ?? "";
+}
 
 // src/notion/markdown.ts
 async function getPageMarkdown(client, pageId, markdownVersion = "v2") {
@@ -593,13 +577,11 @@ function desiredProperties(props) {
     if (key && !(key in out)) out[key] = config;
   };
   put(props.name, { title: {} });
-  put(props.edgeeverId, { rich_text: {} });
-  put(props.notebookId, { rich_text: {} });
   put(props.tags, { multi_select: { options: [] } });
-  put(props.contentHash, { rich_text: {} });
-  put(props.lastSynced, { date: {} });
-  put(props.syncStatus, { select: { options: [] } });
+  put(props.notebook, { select: { options: [] } });
   put(props.edgeeverUpdated, { date: {} });
+  put(props.lastSynced, { date: {} });
+  put(props.edgeeverId, { rich_text: {} });
   return out;
 }
 function expectedType(config) {
@@ -653,18 +635,11 @@ async function ensureSyncDatabase(ctx, client, settings) {
   const desired = desiredProperties(settings.props);
   const previous = await loadSetupRecord(ctx);
   let created = false;
-  let saveRecord = true;
-  let usedManualTarget = false;
   let databaseId = "";
   let dataSourceId = "";
   let databaseUrl;
   let parentPageId = "";
-  if (settings.dataSourceIdSource === "manual") {
-    usedManualTarget = true;
-    saveRecord = false;
-    dataSourceId = settings.dataSourceId || await resolveDataSourceId(client, settings);
-    databaseId = settings.databaseId;
-  } else if (previous) {
+  if (previous) {
     try {
       await client.request(
         "GET",
@@ -751,12 +726,13 @@ async function ensureSyncDatabase(ctx, client, settings) {
     createdAt: previous?.createdAt || nowIso(),
     propertyNames: Object.keys(desired)
   };
-  if (saveRecord) await saveSetupRecord(ctx, record);
+  await saveSetupRecord(ctx, record);
   const parts = [];
   parts.push(
-    usedManualTarget ? "\u68C0\u6D4B\u5230\u8BBE\u7F6E\u91CC\u624B\u52A8\u6307\u5B9A\u7684 Data Source\uFF0C\u672A\u65B0\u5EFA\u6570\u636E\u5E93\u3002" : created ? `\u5DF2\u5728\u7236\u9875\u9762\u4E0B\u521B\u5EFA\u540C\u6B65\u6570\u636E\u5E93\u300C${DEFAULT_DATABASE_TITLE}\u300D\uFF0CData Source ID \u5DF2\u81EA\u52A8\u4FDD\u5B58\uFF0C\u65E0\u9700\u624B\u52A8\u590D\u5236\u3002` : "\u5DF2\u68C0\u6D4B\u5230\u6B64\u524D\u751F\u6210\u7684\u540C\u6B65\u6570\u636E\u5E93\uFF0C\u672A\u91CD\u590D\u521B\u5EFA\u3002"
+    created ? `\u5DF2\u5728\u7236\u9875\u9762\u4E0B\u521B\u5EFA\u540C\u6B65\u6570\u636E\u5E93\u300C${DEFAULT_DATABASE_TITLE}\u300D\uFF0CData Source ID \u5DF2\u81EA\u52A8\u4FDD\u5B58\uFF0C\u65E0\u9700\u624B\u52A8\u590D\u5236\u3002\u9ED8\u8BA4\u53EA\u5C55\u793A\u6807\u9898\u3001\u6807\u7B7E\u3001\u7B14\u8BB0\u672C\u3001\u65F6\u95F4\u4E0E\u540C\u6B65\u65F6\u95F4\u3002` : "\u5DF2\u68C0\u6D4B\u5230\u6B64\u524D\u751F\u6210\u7684\u540C\u6B65\u6570\u636E\u5E93\uFF0C\u672A\u91CD\u590D\u521B\u5EFA\u3002"
   );
   parts.push(addedProperties.length ? `\u65B0\u589E\u5C5E\u6027\uFF1A${addedProperties.join("\u3001")}\u3002` : "\u6240\u9700\u5C5E\u6027\u5DF2\u9F50\u5168\u3002");
+  parts.push("Hash\u3001\u540C\u6B65\u72B6\u6001\u7B49\u6280\u672F\u5B57\u6BB5\u53EA\u4FDD\u7559\u5728\u672C\u5730\uFF0C\u4E0D\u518D\u5199\u5165 Notion \u8868\u683C\u3002");
   if (mismatchedProperties.length) {
     parts.push(`\u4EE5\u4E0B\u5C5E\u6027\u7C7B\u578B\u4E0D\u5339\u914D\uFF0C\u63D2\u4EF6\u4E0D\u4F1A\u81EA\u52A8\u4FEE\u6539\uFF0C\u8BF7\u624B\u52A8\u8C03\u6574\uFF1A${mismatchedProperties.join("\uFF1B")}\u3002`);
   }
@@ -1022,26 +998,47 @@ function paragraphBlock(text) {
 
 // src/edgeever/notes.ts
 var SUPPORTED_KINDS = /* @__PURE__ */ new Set(["text", "", "markdown", "note"]);
+function notebookLabel(nb) {
+  return asString(nb.name ?? nb.title ?? nb.id);
+}
 async function listNotebooks(ctx) {
   const result = await ctx.notebooks.list();
   return Array.isArray(result) ? result.filter((n) => n && typeof n.id === "string") : [];
 }
-async function listNotes(ctx, notebookId) {
+function notebookNameMap(notebooks) {
+  return new Map(notebooks.map((nb) => [nb.id, notebookLabel(nb)]));
+}
+function pickTargetNotebookId(notebookIds, notebooks, preferred) {
+  if (preferred && notebooks.some((n) => n.id === preferred)) return preferred;
+  const selected = notebookIds.find((id) => notebooks.some((n) => n.id === id));
+  return selected ?? notebooks[0]?.id ?? "";
+}
+async function listNotes(ctx, notebookIds) {
+  const ids = Array.from(new Set((notebookIds ?? []).filter(Boolean)));
+  const targets = ids.length ? ids : [""];
   const summaries = [];
-  let offset = 0;
-  const pageSize = 200;
-  for (let page = 0; page < 50; page++) {
-    const res = await ctx.notes.query({
-      ...notebookId ? { notebookId } : {},
-      limit: pageSize,
-      offset,
-      sort: "updated-desc"
-    });
-    const list = Array.isArray(res?.notes) ? res.notes : [];
-    for (const n of list) if (n?.id) summaries.push({ id: n.id, kind: n.kind });
-    const next = res?.nextOffset;
-    if (typeof next !== "number" || list.length === 0) break;
-    offset = next;
+  const seen = /* @__PURE__ */ new Set();
+  for (const notebookId of targets) {
+    let offset = 0;
+    const pageSize = 200;
+    for (let page = 0; page < 50; page++) {
+      const res = await ctx.notes.query({
+        ...notebookId ? { notebookId } : {},
+        limit: pageSize,
+        offset,
+        sort: "updated-desc"
+      });
+      const list = Array.isArray(res?.notes) ? res.notes : [];
+      for (const n of list) {
+        if (n?.id && !seen.has(n.id)) {
+          seen.add(n.id);
+          summaries.push({ id: n.id, kind: n.kind });
+        }
+      }
+      const next = res?.nextOffset;
+      if (typeof next !== "number" || list.length === 0) break;
+      offset = next;
+    }
   }
   const supported = [];
   const unsupported = [];
@@ -1065,12 +1062,43 @@ async function listNotes(ctx, notebookId) {
   }
   return { supported, unsupported, warnings };
 }
+async function listNoteOptions(ctx, notebookIds) {
+  const notebooks = await listNotebooks(ctx);
+  const names = notebookNameMap(notebooks);
+  const filter = new Set((notebookIds ?? []).filter(Boolean));
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  let offset = 0;
+  for (let page = 0; page < 20; page++) {
+    const res = await ctx.notes.query({ limit: 200, offset, sort: "updated-desc" });
+    const list = Array.isArray(res?.notes) ? res.notes : [];
+    for (const n of list) {
+      if (!n?.id || seen.has(n.id)) continue;
+      seen.add(n.id);
+      const nbId = noteNotebookId(n);
+      if (filter.size && !filter.has(nbId)) continue;
+      out.push({
+        id: n.id,
+        title: asString(n.title, "").trim() || "\u672A\u547D\u540D\u7B14\u8BB0",
+        notebookName: names.get(nbId) ?? "",
+        kind: n.kind
+      });
+    }
+    const next = res?.nextOffset;
+    if (typeof next !== "number" || list.length === 0) break;
+    offset = next;
+  }
+  return out;
+}
 function noteTitle(note) {
   return asString(note.title, "").trim() || "\u672A\u547D\u540D\u7B14\u8BB0";
 }
 function noteTags(note) {
   if (!Array.isArray(note.tags)) return [];
   return note.tags.map((t) => asString(t).trim()).filter(Boolean);
+}
+function noteNotebookId(note) {
+  return asString(note.notebookId ?? note.notebook_id ?? "", "");
 }
 function noteUpdatedAt(note) {
   const raw = note.updatedAt ?? note.updated_at;
@@ -1324,26 +1352,49 @@ var SyncEngine = class {
     return ensureSyncDatabase(this.ctx, client, settings);
   }
   /**
+   * 同步单篇笔记：用户主动对某一篇触发即视为确认，直接执行。
+   * 冲突仍不自动覆盖（保持默认策略），会提示用户打开面板处理；
+   * 不把该次执行标记为「全量首次同步完成」，避免提前打开自动同步。
+   */
+  async syncOneNote(noteId) {
+    if (!noteId) throw new Error("\u8BF7\u5148\u9009\u62E9\u8981\u540C\u6B65\u7684\u7B14\u8BB0\u3002");
+    const note = await this.ctx.notes.get(noteId).catch(() => null);
+    if (!note) throw new Error("\u627E\u4E0D\u5230\u8BE5\u7B14\u8BB0\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5\u3002");
+    const result = await this.preview({ noteIds: [noteId] });
+    const blocked = result.plan.filter((i) => i.action === "conflict").length;
+    const actionable = result.plan.filter((i) => i.action !== "conflict");
+    const report = await this.apply(actionable, {}, void 0, { markFirstSync: false });
+    const c = report.counts;
+    const parts = [`\u65B0\u589E ${c.created}`, `\u66F4\u65B0 ${c.updated}`, `\u8DF3\u8FC7 ${c.skipped}`, `\u5931\u8D25 ${c.failed}`];
+    if (blocked) parts.push(`\u51B2\u7A81 ${blocked} \u9879\u672A\u8986\u76D6\uFF08\u8BF7\u6253\u5F00\u540C\u6B65\u9762\u677F\u5904\u7406\uFF09`);
+    if (result.warnings.length) parts.push(`\u63D0\u793A ${result.warnings.length} \u6761`);
+    return { message: `\u5355\u7BC7\u540C\u6B65\u5B8C\u6210\uFF1A${parts.join("\u3001")}\u3002`, report };
+  }
+  /**
    * 只读预览。首次全量同步必须先经过这里（规范 §14）。
    * auto=true 时只保留「已有映射且可安全单向更新」的条目，供自动同步使用。
    */
   async preview(options = {}) {
     const auto = options.auto === true;
+    const singleIds = options.noteIds?.length ? new Set(options.noteIds) : void 0;
     const { settings, client, dataSourceId } = await this.setup();
     const warnings = [];
     const counts = emptyCounts();
     const plan = [];
     const mappings = await loadMappings(this.ctx);
     const notebooks = await listNotebooks(this.ctx);
+    const nameById = notebookNameMap(notebooks);
     if (auto) {
       const state = await loadState(this.ctx);
       if (!state.firstSyncDone) {
         return { plan: [], counts, warnings: ["\u9996\u6B21\u540C\u6B65\u5FC5\u987B\u7531\u7528\u6237\u624B\u52A8\u89E6\u53D1\uFF0C\u81EA\u52A8\u540C\u6B65\u5DF2\u8DF3\u8FC7\u3002"], dataSourceId, notebooks, auto };
       }
     }
-    const scan = await listNotes(this.ctx, settings.notebookId);
+    const scan = await listNotes(this.ctx, settings.notebookIds);
     warnings.push(...scan.warnings);
-    for (const note of scan.unsupported) {
+    const supported = singleIds ? scan.supported.filter((n) => singleIds.has(n.id)) : scan.supported;
+    const unsupported = singleIds ? scan.unsupported.filter((n) => singleIds.has(n.id)) : scan.unsupported;
+    for (const note of unsupported) {
       const item = {
         key: note.id,
         action: "unsupported",
@@ -1368,12 +1419,13 @@ var SyncEngine = class {
       const eeId = plainText(page.properties?.[settings.props.edgeeverId]).trim();
       if (eeId) pageByEeId.set(eeId, page);
     }
-    const knownEeIds = new Set(scan.supported.map((n) => n.id));
-    for (const note of scan.supported) {
+    const knownEeIds = new Set(supported.map((n) => n.id));
+    for (const note of supported) {
       const resources = await listResources(this.ctx, note.id);
       const title = noteTitle(note);
       const tags = noteTags(note);
       const mapping = mappings[note.id];
+      const nbId = noteNotebookId(note);
       const base = {
         key: note.id,
         action: "skip",
@@ -1381,6 +1433,8 @@ var SyncEngine = class {
         reason: "",
         edgeeverNoteId: note.id,
         notionPageId: mapping?.notionPageId,
+        notebookId: nbId,
+        notebookName: nameById.get(nbId) ?? "",
         note,
         noteTitle: title,
         tags,
@@ -1499,7 +1553,7 @@ var SyncEngine = class {
         }, auto);
       }
     }
-    for (const page of activePages) {
+    if (!singleIds) for (const page of activePages) {
       const eeId = plainText(page.properties?.[settings.props.edgeeverId]).trim();
       if (eeId && knownEeIds.has(eeId)) continue;
       const title = readTitle(page, settings.props.name) || `Notion \u9875\u9762 ${page.id.slice(0, 8)}`;
@@ -1551,8 +1605,9 @@ var SyncEngine = class {
     return { plan, counts, warnings, dataSourceId, notebooks, auto };
   }
   /** 执行计划。每条独立失败不影响整批；冲突默认「稍后处理」。 */
-  async apply(plan, resolutions = {}, onProgress) {
+  async apply(plan, resolutions = {}, onProgress, options = {}) {
     const { settings, client, dataSourceId } = await this.setup();
+    const notebooks = await listNotebooks(this.ctx);
     const report = {
       startedAt: nowIso(),
       finishedAt: "",
@@ -1575,6 +1630,7 @@ var SyncEngine = class {
           client,
           dataSourceId,
           mappings,
+          notebooks,
           item,
           resolution,
           maxFileUploadBytes
@@ -1597,9 +1653,11 @@ var SyncEngine = class {
     }
     await saveMappings(this.ctx, mappings);
     report.finishedAt = nowIso();
+    const state = await loadState(this.ctx);
     await saveState(this.ctx, {
-      ...await loadState(this.ctx),
-      firstSyncDone: true,
+      ...state,
+      // 单篇同步不算「全量首次同步完成」，避免提前打开自动同步。
+      firstSyncDone: options.markFirstSync === false ? state.firstSyncDone : true,
       lastSyncAt: report.finishedAt
     });
     await saveReport(this.ctx, report);
@@ -1645,7 +1703,7 @@ var SyncEngine = class {
     mappings[noteId] = {
       edgeeverNoteId: noteId,
       notionPageId: pageId,
-      edgeeverNotebookId: settings.notebookId,
+      edgeeverNotebookId: item.notebookId ?? settings.notebookIds[0] ?? "",
       lastSyncedHash: eHash,
       lastEdgeEverHash: eHash,
       lastNotionHash: nHash,
@@ -1668,7 +1726,7 @@ var SyncEngine = class {
       edgeeverId: noteId,
       markdown: item.markdown ?? ""
     });
-    const warnings = await this.writeMetadata(task, page.id, noteId, "Synced");
+    const warnings = await this.writeMetadata(task, page.id, noteId);
     const attach = await syncAttachments({
       ctx: this.ctx,
       client,
@@ -1699,7 +1757,7 @@ var SyncEngine = class {
       return { action: "skip", message: "\u8FDC\u7AEF\u6B63\u6587\u5728\u9884\u89C8\u4E4B\u540E\u53D1\u751F\u53D8\u5316\uFF0C\u5DF2\u8DF3\u8FC7\u672C\u6B21\u5199\u5165\uFF0C\u8BF7\u91CD\u65B0\u9884\u89C8\u3002" };
     }
     await replacePageMarkdown(client, pageId, item.markdown ?? "", settings.markdownVersion);
-    const warnings = await this.writeMetadata(task, pageId, noteId, "Synced");
+    const warnings = await this.writeMetadata(task, pageId, noteId);
     const attach = await syncAttachments({
       ctx: this.ctx,
       client,
@@ -1725,8 +1783,13 @@ var SyncEngine = class {
     if (existingId && mappings[existingId]) {
       return { action: "skip", message: "\u8BE5\u9875\u9762\u5DF2\u5EFA\u7ACB\u6620\u5C04\uFF0C\u8DF3\u8FC7\u521B\u5EFA EdgeEver \u7B14\u8BB0\u3002" };
     }
+    const notebookId = pickTargetNotebookId(
+      settings.notebookIds,
+      task.notebooks,
+      readNotebookName(page.properties?.[settings.props.notebook])
+    );
     const created = await createNote(this.ctx, {
-      notebookId: settings.notebookId,
+      notebookId,
       title: item.noteTitle ?? item.title,
       contentMarkdown: item.markdown ?? "",
       tags: item.tags ?? []
@@ -1734,7 +1797,12 @@ var SyncEngine = class {
     const noteId = created.id;
     const warnings = [];
     try {
-      await patchProperties(client, pageId, requiredProperties(settings, item.noteTitle ?? item.title, noteId));
+      await patchProperties(client, pageId, {
+        ...requiredProperties(settings, item.noteTitle ?? item.title, noteId),
+        ...optionalProperties(settings, {
+          notebookName: item.notebookName || notebookNameMap(task.notebooks).get(notebookId)
+        })
+      });
     } catch (e) {
       warnings.push(`\u56DE\u5199 EdgeEver ID \u5230 Notion \u5C5E\u6027\u5931\u8D25\uFF1A${redact(errMsg(e), settings.token)}\uFF08\u4E0B\u6B21\u540C\u6B65\u53EF\u80FD\u91CD\u590D\u521B\u5EFA\uFF0C\u8BF7\u68C0\u67E5\u5C5E\u6027\u540D\u4E0E\u7C7B\u578B\uFF09`);
     }
@@ -1758,12 +1826,15 @@ var SyncEngine = class {
       contentMarkdown: item.markdown ?? "",
       tags: item.tags ?? []
     });
-    const warnings = await this.writeMetadata(task, pageId, noteId, "Synced");
+    const warnings = await this.writeMetadata(task, pageId, noteId);
     warnings.push(...await this.finalize(task, noteId, pageId, item.markdown ?? ""));
     return { action: "update-edgeever", message: `\u5DF2\u66F4\u65B0 EdgeEver \u7B14\u8BB0 ${noteId}\u3002`, warnings };
   }
-  /** 属性更新分两步：必需属性、可选属性；失败只记警告，不回滚已成功的正文写入。 */
-  async writeMetadata(task, pageId, noteId, status) {
+  /**
+   * 属性更新分两步：必需属性、用户可见的元数据；失败只记警告，不回滚已成功的正文写入。
+   * Hash / 同步状态等技术值只存本地 mapping，不写入 Notion 表格。
+   */
+  async writeMetadata(task, pageId, noteId) {
     const { settings, client, item } = task;
     const warnings = [];
     try {
@@ -1773,17 +1844,15 @@ var SyncEngine = class {
     }
     try {
       const optional = optionalProperties(settings, {
-        notebookId: settings.notebookId,
+        notebookName: item.notebookName,
         tags: item.tags ?? [],
-        contentHash: item.edgeeverHash,
         lastSynced: nowIso(),
-        syncStatus: status,
         edgeeverUpdated: (item.note ? noteUpdatedAt(item.note) : void 0) ?? nowIso()
       });
       await patchProperties(client, pageId, optional);
     } catch (e) {
       warnings.push(
-        `\u66F4\u65B0\u53EF\u9009\u5C5E\u6027\u5931\u8D25\uFF08\u8BF7\u68C0\u67E5\u6570\u636E\u5E93\u4E2D Tags/Hash/Last Synced/Sync Status \u7684\u7C7B\u578B\uFF09\uFF1A${redact(errMsg(e), settings.token)}`
+        `\u66F4\u65B0\u5C55\u793A\u5C5E\u6027\u5931\u8D25\uFF08\u8BF7\u68C0\u67E5\u6570\u636E\u5E93\u4E2D Tags / Notebook / Last Synced / EdgeEver Updated At \u7684\u7C7B\u578B\uFF09\uFF1A${redact(errMsg(e), settings.token)}`
       );
     }
     return warnings;
@@ -1801,7 +1870,7 @@ var SyncEngine = class {
     mappings[noteId] = {
       edgeeverNoteId: noteId,
       notionPageId: pageId,
-      edgeeverNotebookId: settings.notebookId,
+      edgeeverNotebookId: item.notebookId ?? settings.notebookIds[0] ?? "",
       lastSyncedHash: eHash,
       lastEdgeEverHash: eHash,
       lastNotionHash: nHash,
@@ -1833,7 +1902,7 @@ var ACTION_LABEL = {
   conflict: "\u51B2\u7A81",
   unsupported: "\u7279\u6B8A\u7B14\u8BB0",
   incomplete: "\u5185\u5BB9\u4E0D\u5B8C\u6574",
-  deleted: "\u5220\u9664/\u5F52\u6863\u63D0\u793A",
+  deleted: "\u5220\u9664\u63D0\u793A",
   error: "\u5931\u8D25"
 };
 function openSyncPanel(ctx) {
@@ -1851,64 +1920,44 @@ function registerPanel(ctx, engine) {
       container.append(root);
       let disposed = false;
       let busy = false;
-      let tab = "overview";
       let query = "";
       let preview = null;
       let report = null;
       let resolutions = {};
       let connectionText = "\u5C1A\u672A\u6D4B\u8BD5";
       let notice = "";
+      let setupText = "";
       let progress = { done: 0, total: 0 };
       let settings = loadSettings(ctx);
       let settingsSnapshot = {
-        notebookId: "",
+        notebookIds: [],
         direction: "bidirectional",
         tokenConfigured: false,
-        customApiBase: false
+        setupReady: false
       };
       let notebooks = [];
+      let noteOptions = [];
+      let singleNoteId = "";
       let mappingCount = 0;
       let deletedCount = 0;
-      let firstSyncDone = false;
       let lastSyncAt = "";
       let confirmChecked = false;
-      let setupText = "";
-      let setupDataSourceId = "";
+      const pickNoteMode = state?.pickNote === true;
       shell.set({
         header: {
-          title: "Notion \u53CC\u5411\u540C\u6B65",
-          description: "\u5148\u9884\u89C8\u3001\u540E\u6267\u884C\uFF1B\u51B2\u7A81\u9ED8\u8BA4\u4E0D\u8986\u76D6\u4EFB\u4E00\u7AEF\u3002",
+          title: "Notion \u540C\u6B65",
+          description: "\u9009\u597D\u8303\u56F4 \u2192 \u751F\u6210\u9884\u89C8 \u2192 \u786E\u8BA4\u6267\u884C",
           actions: [
-            { id: "test", label: "\u6D4B\u8BD5\u8FDE\u63A5" },
             { id: "preview", label: "\u751F\u6210\u9884\u89C8" },
-            { id: "apply", label: "\u6267\u884C\u540C\u6B65" },
-            { id: "setup", label: "\u4E00\u952E\u751F\u6210\u540C\u6B65\u6570\u636E\u5E93" }
+            { id: "apply", label: "\u6267\u884C\u540C\u6B65" }
           ]
         },
-        toolbar: [
-          {
-            type: "tabs",
-            key: "tab",
-            value: "overview",
-            options: [
-              { value: "overview", label: "\u6982\u89C8" },
-              { value: "plan", label: "\u540C\u6B65\u8BA1\u5212" },
-              { value: "report", label: "\u4E0A\u6B21\u7ED3\u679C" }
-            ]
-          },
-          { type: "search", key: "q", placeholder: "\u7B5B\u9009\u7B14\u8BB0\u6807\u9898" }
-        ],
+        toolbar: [{ type: "search", key: "q", placeholder: "\u7B5B\u9009\u540C\u6B65\u8BA1\u5212" }],
         onAction(actionId) {
-          if (actionId === "test") void runTest();
           if (actionId === "preview") void runPreview();
           if (actionId === "apply") void runApply();
-          if (actionId === "setup") void runSetup();
         },
         onChange(key, value) {
-          if (key === "tab") {
-            tab = value === "plan" || value === "report" ? value : "overview";
-            render();
-          }
           if (key === "q") {
             query = String(value ?? "").toLowerCase();
             render();
@@ -1919,21 +1968,22 @@ function registerPanel(ctx, engine) {
         const s = await loadSettings(ctx);
         settings = Promise.resolve(s);
         settingsSnapshot = {
-          notebookId: s.notebookId,
+          notebookIds: s.notebookIds,
           direction: s.direction,
           tokenConfigured: Boolean(s.token),
-          customApiBase: isCustomApiBase(s)
+          setupReady: Boolean(s.dataSourceId)
         };
         const st = await loadState(ctx);
-        firstSyncDone = st.firstSyncDone;
         lastSyncAt = st.lastSyncAt ?? "";
         const mappings = await loadMappings(ctx);
         mappingCount = Object.keys(mappings).length;
         deletedCount = Object.values(mappings).filter((m) => m?.status === "deleted").length;
         report = await loadReport(ctx) ?? null;
-        const setupRecord = await loadSetupRecord(ctx);
-        setupDataSourceId = setupRecord?.dataSourceId ?? "";
-        notebooks = (await ctx.notebooks.list()).filter((n) => n && typeof n.id === "string").map((n) => ({ id: n.id, name: String(n.name ?? n.title ?? n.id) }));
+        const list = await ctx.notebooks.list();
+        const names = notebookNameMap(list);
+        notebooks = list.filter((n) => n && typeof n.id === "string").map((n) => ({ id: n.id, name: names.get(n.id) ?? n.id }));
+        noteOptions = await listNoteOptions(ctx, s.notebookIds);
+        if (singleNoteId && !noteOptions.some((o) => o.id === singleNoteId)) singleNoteId = "";
         render();
       }
       function render() {
@@ -1941,44 +1991,50 @@ function registerPanel(ctx, engine) {
         const s = settingsSnapshot;
         const counts = preview?.counts;
         const warningList = [.../* @__PURE__ */ new Set([...preview?.warnings ?? [], ...report?.warnings ?? []])];
+        const selected = new Set(s.notebookIds);
+        const scopeLabel = selected.size ? `\u5DF2\u9009 ${selected.size} \u4E2A\u7B14\u8BB0\u672C` : "\u5168\u90E8\u7B14\u8BB0\u672C";
         root.innerHTML = `
           <div class="ens-status ${busy ? "ens-busy" : ""}">
-            <div class="ens-row"><strong>\u8FDE\u63A5\u72B6\u6001</strong><span>${escapeHtml(connectionText)}</span></div>
-            <div class="ens-row"><strong>Token</strong><span>${s.tokenConfigured ? "\u5DF2\u914D\u7F6E\uFF08\u52A0\u5BC6\u5B58\u50A8\uFF0C\u4E0D\u56DE\u663E\uFF09" : "\u672A\u914D\u7F6E"}</span></div>
-            <div class="ens-row"><strong>\u540C\u6B65\u6570\u636E\u5E93</strong><span>${setupDataSourceId ? `\u5DF2\u751F\u6210 \xB7 Data Source ${escapeHtml(setupDataSourceId.slice(0, 8))}\u2026` : "\u5C1A\u672A\u751F\u6210\uFF08\u70B9\u51FB\u300C\u4E00\u952E\u751F\u6210\u540C\u6B65\u6570\u636E\u5E93\u300D\uFF09"}</span></div>
-            <div class="ens-row"><strong>API \u5730\u5740</strong><span>${s.customApiBase ? "\u81EA\u5EFA\u4EE3\u7406\uFF08Token \u5C06\u53D1\u5F80\u8BE5\u5730\u5740\uFF09" : "\u5B98\u65B9 api.notion.com"}</span></div>
-            <div class="ens-row"><strong>\u5DF2\u5EFA\u7ACB\u6620\u5C04</strong><span>${mappingCount} \u6761${deletedCount ? `\uFF0C\u5176\u4E2D ${deletedCount} \u6761\u6807\u8BB0\u4E3A\u5220\u9664` : ""}</span></div>
-            <div class="ens-row"><strong>\u4E0A\u6B21\u540C\u6B65</strong><span>${escapeHtml(lastSyncAt || "\u5C1A\u672A\u540C\u6B65")}</span></div>
+            <span>Token ${s.tokenConfigured ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}</span>
+            <span>\u540C\u6B65\u6570\u636E\u5E93 ${s.setupReady ? "\u5DF2\u751F\u6210" : "\u672A\u751F\u6210"}</span>
+            <span>\u8303\u56F4 ${escapeHtml(scopeLabel)}</span>
+            <span>\u4E0A\u6B21\u540C\u6B65 ${escapeHtml(lastSyncAt || "\u5C1A\u672A\u540C\u6B65")}</span>
+            <span>\u6620\u5C04 ${mappingCount} \u6761</span>
           </div>
 
-          <div class="ens-controls">
-            <label>\u540C\u6B65\u7B14\u8BB0\u672C
-              <select data-control="notebook">
-                <option value="">\uFF08\u672A\u9009\u62E9\uFF09</option>
-                ${notebooks.map((n) => `<option value="${escapeHtml(n.id)}" ${n.id === s.notebookId ? "selected" : ""}>${escapeHtml(n.name)}</option>`).join("")}
-              </select>
-            </label>
-            <label>\u540C\u6B65\u65B9\u5411
+          <div class="ens-section">
+            <div class="ens-label">\u540C\u6B65\u8303\u56F4 <small>\u4E0D\u52FE\u9009 = \u5168\u90E8\u7B14\u8BB0\u672C\uFF1B\u53EF\u52FE\u9009\u5355\u4E2A\u6216\u591A\u4E2A</small></div>
+            <div class="ens-checks">
+              ${notebooks.length ? notebooks.map((n) => `<label><input type="checkbox" data-control="notebook" data-id="${escapeHtml(n.id)}" ${selected.has(n.id) ? "checked" : ""}/>${escapeHtml(n.name)}</label>`).join("") : `<span class="ens-empty">\u6CA1\u6709\u53EF\u7528\u7B14\u8BB0\u672C</span>`}
+              ${selected.size ? `<button data-action="clear-notebooks">\u6E05\u7A7A\u9009\u62E9</button>` : ""}
+            </div>
+          </div>
+
+          <div class="ens-inline">
+            <label>\u65B9\u5411
               <select data-control="direction">
-                <option value="bidirectional" ${s.direction === "bidirectional" ? "selected" : ""}>\u53CC\u5411\uFF08\u51B2\u7A81\u9700\u4EBA\u5DE5\u5904\u7406\uFF09</option>
+                <option value="bidirectional" ${s.direction === "bidirectional" ? "selected" : ""}>\u53CC\u5411</option>
                 <option value="push" ${s.direction === "push" ? "selected" : ""}>\u4EC5\u63A8\u9001\u5230 Notion</option>
                 <option value="pull" ${s.direction === "pull" ? "selected" : ""}>\u4EC5\u62C9\u53D6\u5230 EdgeEver</option>
               </select>
             </label>
+            <label>\u5355\u7BC7\u7B14\u8BB0
+              <select data-control="single-note">
+                <option value="">\u9009\u62E9\u7B14\u8BB0\u2026</option>
+                ${noteOptions.map((o) => `<option value="${escapeHtml(o.id)}" ${o.id === singleNoteId ? "selected" : ""}>${escapeHtml(o.title)}${o.notebookName ? ` \xB7 ${escapeHtml(o.notebookName)}` : ""}</option>`).join("")}
+              </select>
+            </label>
+            <button data-action="sync-one" ${!singleNoteId || busy ? "disabled" : ""}>\u540C\u6B65\u6B64\u7BC7</button>
           </div>
+          ${pickNoteMode ? `<div class="ens-hint">\u5BBF\u4E3B\u672A\u63D0\u4F9B\u300C\u5F53\u524D\u7B14\u8BB0\u300D\u4E0A\u4E0B\u6587\uFF0C\u8BF7\u5728\u8FD9\u91CC\u9009\u62E9\u8981\u540C\u6B65\u7684\u90A3\u4E00\u7BC7\u7B14\u8BB0\u3002</div>` : ""}
 
           <div class="ens-actions">
-            <button data-action="setup">\u4E00\u952E\u751F\u6210\u540C\u6B65\u6570\u636E\u5E93</button>
-            <button data-action="test">\u6D4B\u8BD5\u8FDE\u63A5</button>
             <button data-action="preview">\u751F\u6210\u9884\u89C8</button>
             <button data-action="apply" ${!preview || busy ? "disabled" : ""}>\u6267\u884C\u540C\u6B65\uFF08${preview?.plan.length ?? 0} \u9879\uFF09</button>
-            <button data-action="restore">\u6062\u590D\u5220\u9664\u6620\u5C04\uFF08${deletedCount}\uFF09</button>
-            <button data-action="retry" ${!report || busy ? "disabled" : ""}>\u91CD\u8BD5\u5931\u8D25\u9879</button>
           </div>
-
           <label class="ens-confirm">
             <input type="checkbox" data-control="confirm" ${confirmChecked ? "checked" : ""}/>
-            \u6211\u5DF2\u9605\u8BFB\u4E0B\u65B9\u540C\u6B65\u8BA1\u5212\uFF0C\u786E\u8BA4\u6267\u884C\u4E0A\u8FF0\u5199\u5165\uFF08\u9996\u6B21\u5168\u91CF\u540C\u6B65\u4E0D\u4F1A\u81EA\u52A8\u5F00\u59CB\uFF09
+            \u6211\u5DF2\u9605\u8BFB\u4E0B\u65B9\u540C\u6B65\u8BA1\u5212\uFF0C\u786E\u8BA4\u6267\u884C\u5199\u5165
           </label>
 
           ${notice ? `<div class="ens-notice">${escapeHtml(notice)}</div>` : ""}
@@ -1994,29 +2050,34 @@ function registerPanel(ctx, engine) {
               <span>\u5220\u9664\u63D0\u793A ${counts.deleted}</span><span>\u5931\u8D25 ${counts.failed}</span>
             </div>` : ""}
 
-          ${warningList.length ? `<div class="ens-warnings"><strong>\u63D0\u793A\u4E0E\u8B66\u544A</strong><ul>${warningList.map((w) => `<li>${escapeHtml(truncate(w, 400))}</li>`).join("")}</ul></div>` : ""}
+          ${warningList.length ? `<div class="ens-warnings"><strong>\u63D0\u793A</strong><ul>${warningList.map((w) => `<li>${escapeHtml(truncate(w, 400))}</li>`).join("")}</ul></div>` : ""}
 
-          <div class="ens-list">
-            ${tab === "overview" ? overviewHtml() : tab === "plan" ? planHtml() : reportHtml()}
-          </div>
+          <div class="ens-list">${planHtml()}</div>
+
+          <details class="ens-advanced">
+            <summary>\u9AD8\u7EA7\u9009\u9879\u4E0E\u8BF4\u660E</summary>
+            <div class="ens-actions">
+              <button data-action="setup">\u4E00\u952E\u751F\u6210\u540C\u6B65\u6570\u636E\u5E93</button>
+              <button data-action="test">\u6D4B\u8BD5\u8FDE\u63A5</button>
+              <button data-action="restore">\u6062\u590D\u5220\u9664\u6620\u5C04\uFF08${deletedCount}\uFF09</button>
+              <button data-action="retry" ${!report || busy ? "disabled" : ""}>\u91CD\u8BD5\u5931\u8D25\u9879</button>
+            </div>
+            <p class="ens-report-meta">\u8FDE\u63A5\uFF1A${escapeHtml(connectionText)}</p>
+            ${reportHtml()}
+            <ol class="ens-help">
+              <li>Notion \u91CC\u5EFA\u4E00\u4E2A\u7A7A\u9875\u9762\uFF0C\u5728\u8BE5\u9875\u9762\u300C\xB7\xB7\xB7 \u2192 Connections\u300D\u4E2D\u52A0\u5165 Integration\uFF1B\u63D2\u4EF6\u8BBE\u7F6E\u53EA\u586B Token \u4E0E\u7236\u9875\u9762 ID\u3002</li>
+              <li>\u70B9\u300C\u4E00\u952E\u751F\u6210\u540C\u6B65\u6570\u636E\u5E93\u300D\u81EA\u52A8\u5EFA\u5E93\u5E76\u4FDD\u5B58 Data Source ID\uFF0C\u65E0\u9700\u624B\u5199\u4EFB\u4F55 ID\u3002</li>
+              <li>\u9ED8\u8BA4\u53EA\u5C55\u793A\u6807\u9898\u3001\u6807\u7B7E\u3001\u7B14\u8BB0\u672C\u3001\u65F6\u95F4\u4E0E\u540C\u6B65\u65F6\u95F4\uFF1BHash \u7B49\u6280\u672F\u503C\u53EA\u4FDD\u5B58\u5728\u672C\u5730\u3002</li>
+              <li>\u51B2\u7A81\u9ED8\u8BA4\u4E0D\u8986\u76D6\u4EFB\u4E00\u7AEF\uFF1B\u5220\u9664\u53EA\u6807\u8BB0\u6620\u5C04\uFF0C\u4E0D\u6C38\u4E45\u5220\u9664\u4EFB\u4E00\u7AEF\u6570\u636E\u3002</li>
+            </ol>
+          </details>
         `;
       }
-      function overviewHtml() {
-        return `
-          <h3>\u4F7F\u7528\u8BF4\u660E</h3>
-          <ol>
-            <li>\u5728 Notion \u65B0\u5EFA\u4E00\u4E2A\u7A7A\u9875\u9762\uFF0C\u5728\u8BE5\u9875\u9762\u300C\xB7\xB7\xB7 \u2192 Connections\u300D\u4E2D\u6DFB\u52A0 Integration\uFF1BToken \u9700\u5177\u5907 Read / Update / Insert content \u80FD\u529B\u3002</li>
-            <li>\u63D2\u4EF6\u8BBE\u7F6E\u91CC\u586B\u5199 Token \u4E0E\u300CNotion \u7236\u9875\u9762 ID\u300D\uFF08\u53EF\u7C98\u8D34\u9875\u9762\u94FE\u63A5\uFF09\uFF0C\u70B9\u51FB\u672C\u9762\u677F\u7684\u300C\u4E00\u952E\u751F\u6210\u540C\u6B65\u6570\u636E\u5E93\u300D\uFF1A\u63D2\u4EF6\u81EA\u52A8\u5EFA\u5E93\u3001\u5EFA\u597D\u5168\u90E8\u5C5E\u6027\u5E76\u4FDD\u5B58 Data Source ID\uFF0C\u65E0\u9700\u624B\u52A8\u590D\u5236\u4EFB\u4F55 ID\u3002</li>
-            <li>\u5DF2\u6709\u6570\u636E\u5E93\u4E5F\u53EF\u5728\u8BBE\u7F6E\u91CC\u76F4\u63A5\u586B Data Source ID / \u6570\u636E\u5E93 ID\uFF1B\u6B64\u65F6\u4E00\u952E\u751F\u6210\u53EA\u68C0\u67E5\u5E76\u8865\u9F50\u7F3A\u5931\u5C5E\u6027\uFF0C\u4E0D\u4F1A\u91CD\u590D\u5EFA\u5E93\u3002</li>
-            <li>\u9009\u62E9\u7B14\u8BB0\u672C \u2192 \u6D4B\u8BD5\u8FDE\u63A5 \u2192 \u751F\u6210\u9884\u89C8 \u2192 \u52FE\u9009\u786E\u8BA4 \u2192 \u6267\u884C\u540C\u6B65\u3002</li>
-          </ol>
-          <p>\u4E00\u952E\u751F\u6210\u4E0D\u4F1A\u5220\u9664\u6216\u6539\u7C7B\u578B\u4EFB\u4F55\u5DF2\u6709\u5C5E\u6027\uFF1B\u7C7B\u578B\u4E0D\u5339\u914D\u53EA\u4F1A\u63D0\u793A\uFF0C\u9700\u624B\u52A8\u5728 Notion \u4E2D\u8C03\u6574\u3002\u7279\u6B8A\u7B14\u8BB0\u4E0E\u4E0D\u5B8C\u6574\u7684 Notion Markdown \u4E00\u5F8B\u8DF3\u8FC7\uFF0C\u4E0D\u4F1A\u88AB\u666E\u901A Markdown \u8986\u76D6\u3002</p>
-          <p>\u7279\u6B8A\u7B14\u8BB0\uFF08\u601D\u7EF4\u5BFC\u56FE\u3001\u8868\u683C\u3001\u6D77\u62A5\u3001\u4FE1\u606F\u56FE\u7B49\uFF09\u4E0E\u4E0D\u5B8C\u6574\u7684 Notion Markdown \u4E00\u5F8B\u8DF3\u8FC7\u5E76\u63D0\u793A\uFF0C\u4E0D\u4F1A\u88AB\u666E\u901A Markdown \u8986\u76D6\u3002</p>
-          <p>\u5220\u9664\u91C7\u7528\u8F6F\u5220\u9664\u7B56\u7565\uFF1A\u53EA\u6807\u8BB0\u6620\u5C04\u5E76\u63D0\u793A\uFF0C\u4E0D\u81EA\u52A8\u6C38\u4E45\u5220\u9664\u4EFB\u4E00\u7AEF\u6570\u636E\u3002</p>
-        `;
+      function filtered(items) {
+        return items.filter((i) => !query || i.title.toLowerCase().includes(query));
       }
       function planHtml() {
-        if (!preview) return `<p class="ens-empty">\u5C1A\u672A\u751F\u6210\u9884\u89C8\u3002\u70B9\u51FB\u300C\u751F\u6210\u9884\u89C8\u300D\u67E5\u770B\u5C06\u8981\u53D1\u751F\u7684\u64CD\u4F5C\u3002</p>`;
+        if (!preview) return `<p class="ens-empty">\u70B9\u51FB\u300C\u751F\u6210\u9884\u89C8\u300D\u67E5\u770B\u5C06\u8981\u53D1\u751F\u7684\u64CD\u4F5C\uFF08\u6B64\u9636\u6BB5\u53EA\u8BFB\uFF09\u3002</p>`;
         const items = filtered(preview.plan);
         if (!items.length) return `<p class="ens-empty">\u6CA1\u6709\u7B26\u5408\u6761\u4EF6\u7684\u8BA1\u5212\u9879\u3002</p>`;
         return items.map((item) => {
@@ -2041,18 +2102,15 @@ function registerPanel(ctx, engine) {
       }
       function reportHtml() {
         if (!report) return `<p class="ens-empty">\u5C1A\u65E0\u540C\u6B65\u62A5\u544A\u3002</p>`;
-        const items = (report.items ?? []).filter((i) => !query || i.title.toLowerCase().includes(query));
+        const items = report.items ?? [];
         return `
           <div class="ens-report-meta">\u5F00\u59CB ${escapeHtml(report.startedAt)} \xB7 \u7ED3\u675F ${escapeHtml(report.finishedAt)} \xB7 \u65B9\u5411 ${escapeHtml(report.direction)}</div>
           ${items.length ? items.map((i) => `
             <div class="ens-item ens-${escapeHtml(i.action)}">
               <div class="ens-item-head"><span class="ens-badge">${escapeHtml(ACTION_LABEL[i.action] ?? i.action)}</span><strong>${escapeHtml(i.title)}</strong></div>
               <div class="ens-reason">${escapeHtml(truncate(i.message, 600))}</div>
-            </div>`).join("") : `<p class="ens-empty">\u6CA1\u6709\u5339\u914D\u7684\u8BB0\u5F55\u3002</p>`}
+            </div>`).join("") : `<p class="ens-empty">\u6CA1\u6709\u8BB0\u5F55\u3002</p>`}
         `;
-      }
-      function filtered(items) {
-        return items.filter((i) => !query || i.title.toLowerCase().includes(query));
       }
       function setBusy(value, message = "") {
         busy = value;
@@ -2062,6 +2120,10 @@ function registerPanel(ctx, engine) {
       async function currentSettings() {
         return settings;
       }
+      async function showError(e) {
+        const s = await currentSettings();
+        setBusy(false, redact(errMsg(e), s.token));
+      }
       async function runSetup() {
         if (busy) return;
         setBusy(true, "\u6B63\u5728\u751F\u6210/\u68C0\u67E5\u540C\u6B65\u6570\u636E\u5E93\u2026");
@@ -2069,15 +2131,11 @@ function registerPanel(ctx, engine) {
           const result = await engine.setupDatabase();
           setupText = result.message;
           await refreshMeta();
-          setBusy(
-            false,
-            result.created ? `\u540C\u6B65\u6570\u636E\u5E93\u5DF2\u751F\u6210\uFF0CData Source ID \u5DF2\u81EA\u52A8\u4FDD\u5B58\uFF08${result.record.dataSourceId.slice(0, 8)}\u2026\uFF09\uFF0C\u73B0\u5728\u53EF\u4EE5\u6D4B\u8BD5\u8FDE\u63A5\u3002` : "\u540C\u6B65\u6570\u636E\u5E93\u68C0\u67E5\u5B8C\u6210\uFF0C\u672A\u91CD\u590D\u5EFA\u5E93\u3002"
-          );
+          setBusy(false, result.created ? "\u540C\u6B65\u6570\u636E\u5E93\u5DF2\u751F\u6210\uFF0CData Source ID \u5DF2\u81EA\u52A8\u4FDD\u5B58\u3002" : "\u540C\u6B65\u6570\u636E\u5E93\u68C0\u67E5\u5B8C\u6210\uFF0C\u672A\u91CD\u590D\u5EFA\u5E93\u3002");
           ctx.ui.showNotice(result.created ? "Notion \u540C\u6B65\u6570\u636E\u5E93\u5DF2\u751F\u6210" : "Notion \u540C\u6B65\u6570\u636E\u5E93\u68C0\u67E5\u5B8C\u6210");
         } catch (e) {
-          const s = await currentSettings();
           setupText = "";
-          setBusy(false, redact(errMsg(e), s.token));
+          await showError(e);
         }
       }
       async function runTest() {
@@ -2085,13 +2143,12 @@ function registerPanel(ctx, engine) {
         setBusy(true, "\u6B63\u5728\u9A8C\u8BC1 Token \u4E0E Data Source \u8BBF\u95EE\u6743\u9650\u2026");
         try {
           const info = await engine.testConnection();
-          connectionText = `\u5DF2\u8FDE\u63A5\uFF1A${info.workspaceName || info.botName || "Notion \u5DE5\u4F5C\u533A"} \xB7 Data Source ${info.dataSourceId.slice(0, 8)}\u2026`;
-          setBusy(false, "\u8FDE\u63A5\u9A8C\u8BC1\u901A\u8FC7\u3002Token \u6709\u6548\u4E14 Integration \u5DF2\u83B7\u6388\u6743\u8BBF\u95EE\u76EE\u6807 Data Source\u3002");
+          connectionText = `\u5DF2\u8FDE\u63A5\uFF1A${info.workspaceName || info.botName || "Notion \u5DE5\u4F5C\u533A"}`;
+          setBusy(false, "\u8FDE\u63A5\u9A8C\u8BC1\u901A\u8FC7\u3002");
           ctx.ui.showNotice("Notion \u8FDE\u63A5\u9A8C\u8BC1\u901A\u8FC7");
         } catch (e) {
           connectionText = "\u8FDE\u63A5\u5931\u8D25";
-          const s = await currentSettings();
-          setBusy(false, redact(errMsg(e), s.token));
+          await showError(e);
         }
       }
       async function runPreview() {
@@ -2102,10 +2159,9 @@ function registerPanel(ctx, engine) {
           resolutions = {};
           confirmChecked = false;
           await refreshMeta();
-          setBusy(false, `\u9884\u89C8\u5B8C\u6210\uFF1A\u5171 ${preview.plan.length} \u9879\u3002\u8BF7\u67E5\u770B\u300C\u540C\u6B65\u8BA1\u5212\u300D\u540E\u518D\u6267\u884C\u3002`);
+          setBusy(false, `\u9884\u89C8\u5B8C\u6210\uFF1A\u5171 ${preview.plan.length} \u9879\uFF0C\u8BF7\u786E\u8BA4\u540E\u6267\u884C\u3002`);
         } catch (e) {
-          const s = await currentSettings();
-          setBusy(false, redact(errMsg(e), s.token));
+          await showError(e);
         }
       }
       async function runApply() {
@@ -2136,10 +2192,27 @@ function registerPanel(ctx, engine) {
           confirmChecked = false;
           render();
         } catch (e) {
-          const s = await currentSettings();
-          setBusy(false, redact(errMsg(e), s.token));
+          await showError(e);
         } finally {
           progress = { done: 0, total: 0 };
+        }
+      }
+      async function runSyncOne() {
+        if (busy || !singleNoteId) {
+          notice = "\u8BF7\u5148\u9009\u62E9\u8981\u540C\u6B65\u7684\u7B14\u8BB0\u3002";
+          render();
+          return;
+        }
+        setBusy(true, "\u6B63\u5728\u540C\u6B65\u5355\u7BC7\u7B14\u8BB0\u2026");
+        try {
+          const result = await engine.syncOneNote(singleNoteId);
+          report = result.report;
+          notice = result.message;
+          ctx.ui.showNotice(result.message);
+          await refreshMeta();
+          setBusy(false, result.message);
+        } catch (e) {
+          await showError(e);
         }
       }
       async function runRestore() {
@@ -2148,17 +2221,13 @@ function registerPanel(ctx, engine) {
           const mappings = await loadMappings(ctx);
           let n = 0;
           for (const [id, m] of Object.entries(mappings)) {
-            if (m?.status === "deleted") {
-              if (await restoreMapping(ctx, id)) n++;
-            }
+            if (m?.status === "deleted" && await restoreMapping(ctx, id)) n++;
           }
           await refreshMeta();
           notice = `\u5DF2\u6062\u590D ${n} \u6761\u6620\u5C04\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210\u9884\u89C8\u3002`;
           render();
         } catch (e) {
-          const s = await currentSettings();
-          notice = redact(errMsg(e), s.token);
-          render();
+          await showError(e);
         }
       }
       async function runRetry() {
@@ -2185,8 +2254,7 @@ function registerPanel(ctx, engine) {
           setBusy(false, `\u91CD\u8BD5\u5B8C\u6210\uFF1A\u5931\u8D25 ${report.counts.failed} \u9879\u3002`);
           await refreshMeta();
         } catch (e) {
-          const s = await currentSettings();
-          setBusy(false, redact(errMsg(e), s.token));
+          await showError(e);
         }
       }
       function onClick(event) {
@@ -2198,8 +2266,10 @@ function registerPanel(ctx, engine) {
         else if (action === "setup") void runSetup();
         else if (action === "preview") void runPreview();
         else if (action === "apply") void runApply();
+        else if (action === "sync-one") void runSyncOne();
         else if (action === "restore") void runRestore();
         else if (action === "retry") void runRetry();
+        else if (action === "clear-notebooks") void clearNotebooks();
         else if (action === "resolve") {
           const key = target.dataset.key;
           const value = target.dataset.value;
@@ -2208,6 +2278,14 @@ function registerPanel(ctx, engine) {
             render();
           }
         }
+      }
+      async function clearNotebooks() {
+        await saveNotebookSelection(ctx, []);
+        settingsSnapshot = { ...settingsSnapshot, notebookIds: [] };
+        preview = null;
+        notice = "\u5DF2\u6E05\u7A7A\u7B14\u8BB0\u672C\u9009\u62E9\uFF0C\u5C06\u540C\u6B65\u5168\u90E8\u7B14\u8BB0\u672C\u3002";
+        await refreshMeta();
+        render();
       }
       function onChange(event) {
         const target = event.target;
@@ -2218,21 +2296,39 @@ function registerPanel(ctx, engine) {
           render();
           return;
         }
-        const key = control === "notebook" ? "sync-notebook-id" : "sync-direction";
-        const value = target.value;
-        void (async () => {
-          try {
-            await ctx.settings.set(key, value);
-            settingsSnapshot = control === "notebook" ? { ...settingsSnapshot, notebookId: value } : { ...settingsSnapshot, direction: value };
-            preview = null;
-            notice = "\u914D\u7F6E\u5DF2\u66F4\u65B0\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210\u9884\u89C8\u3002";
-            render();
-          } catch (e) {
-            const s = await currentSettings();
-            notice = `\u4FDD\u5B58\u914D\u7F6E\u5931\u8D25\uFF0C\u8BF7\u5728\u63D2\u4EF6\u8BBE\u7F6E\u4E2D\u624B\u52A8\u4FEE\u6539\uFF1A${redact(errMsg(e), s.token)}`;
-            render();
-          }
-        })();
+        if (control === "single-note") {
+          singleNoteId = target.value;
+          render();
+          return;
+        }
+        if (control === "notebook") {
+          const id = target?.dataset?.id ?? "";
+          const checked = target.checked;
+          const next = new Set(settingsSnapshot.notebookIds);
+          if (checked) next.add(id);
+          else next.delete(id);
+          const ids = Array.from(next).filter(Boolean);
+          settingsSnapshot = { ...settingsSnapshot, notebookIds: ids };
+          preview = null;
+          notice = ids.length ? `\u5DF2\u9009\u62E9 ${ids.length} \u4E2A\u7B14\u8BB0\u672C\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210\u9884\u89C8\u3002` : "\u672A\u52FE\u9009\u4EFB\u4F55\u7B14\u8BB0\u672C\uFF0C\u5C06\u540C\u6B65\u5168\u90E8\u7B14\u8BB0\u672C\u3002";
+          void saveNotebookSelection(ctx, ids).then(() => refreshMeta());
+          render();
+          return;
+        }
+        if (control === "direction") {
+          const value = target.value;
+          void (async () => {
+            try {
+              await ctx.settings.set("sync-direction", value);
+              settingsSnapshot = { ...settingsSnapshot, direction: value };
+              preview = null;
+              notice = "\u540C\u6B65\u65B9\u5411\u5DF2\u66F4\u65B0\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210\u9884\u89C8\u3002";
+              render();
+            } catch (e) {
+              await showError(e);
+            }
+          })();
+        }
       }
       root.addEventListener("click", onClick);
       root.addEventListener("change", onChange);
@@ -2258,6 +2354,19 @@ function extractNoteId(payload) {
   const id = p?.note?.id ?? p?.noteId ?? p?.id;
   return typeof id === "string" && id ? id : void 0;
 }
+async function currentNoteId(ctx) {
+  try {
+    const doc = await ctx.editor?.getDocument?.();
+    if (!doc || typeof doc !== "object") return void 0;
+    const d = doc;
+    const raw = d.noteId ?? d.note?.id ?? d.id;
+    if (typeof raw !== "string" || !raw) return void 0;
+    const note = await ctx.notes.get(raw).catch(() => null);
+    return note ? raw : void 0;
+  } catch {
+    return void 0;
+  }
+}
 var main_default = {
   activate(context) {
     const ctx = context;
@@ -2282,6 +2391,28 @@ var main_default = {
     );
     disposers.push(
       ctx.commands.register({
+        id: "notion-sync-single-note",
+        title: "Notion \u540C\u6B65\uFF1A\u540C\u6B65\u5355\u7BC7\u7B14\u8BB0",
+        listed: true,
+        menu: true,
+        run: async () => {
+          try {
+            const id = await currentNoteId(ctx);
+            if (!id) {
+              await ctx.ui.panels.open(PANEL_ID, { state: { pickNote: true } });
+              return;
+            }
+            const result = await engine.syncOneNote(id);
+            ctx.ui.showNotice(result.message);
+          } catch (e) {
+            const s = await loadSettings(ctx);
+            ctx.ui.showNotice(`\u5355\u7BC7\u540C\u6B65\u5931\u8D25\uFF1A${redact(errMsg(e), s.token)}`);
+          }
+        }
+      })
+    );
+    disposers.push(
+      ctx.commands.register({
         id: "notion-sync-status",
         title: "Notion \u540C\u6B65\uFF1A\u67E5\u770B\u4E0A\u6B21\u7ED3\u679C",
         run: async () => {
@@ -2292,7 +2423,8 @@ var main_default = {
           ]);
           const parts = [
             `Token ${settings.token ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}`,
-            `\u7B14\u8BB0\u672C ${settings.notebookId || "\u672A\u9009\u62E9"}`,
+            `\u6570\u636E\u5E93 ${settings.dataSourceId ? "\u5DF2\u751F\u6210" : "\u672A\u751F\u6210"}`,
+            `\u8303\u56F4 ${settings.notebookIds.length ? `${settings.notebookIds.length} \u4E2A\u7B14\u8BB0\u672C` : "\u5168\u90E8\u7B14\u8BB0\u672C"}`,
             `\u65B9\u5411 ${settings.direction}`,
             `\u9996\u6B21\u540C\u6B65 ${state.firstSyncDone ? "\u5DF2\u5B8C\u6210" : "\u672A\u8FDB\u884C"}`
           ];
@@ -2347,7 +2479,7 @@ var main_default = {
     disposers.push(
       ctx.events.on("settings.changed", (payload) => {
         const key = payload?.key;
-        if (key === "auto-sync" || key === "auto-sync-delay-sec") void scheduleAutoSync();
+        if (key === "auto-sync") void scheduleAutoSync();
       })
     );
     disposers.push(

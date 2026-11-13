@@ -81,39 +81,24 @@ const DEFAULT_NOTES = [
   },
 ];
 
+/** 设置界面只保留 5 项；Data Source ID / 属性名 / API 地址都由插件内部管理。 */
 const DEFAULT_SETTINGS = {
   "notion-token": TOKEN,
-  "notion-data-source-id": DS_ID,
-  "notion-database-id": "db-00000001",
-  "api-base-url": "https://api.notion.com",
-  "notion-version": "2026-03-11",
-  "markdown-version": "v2",
-  "sync-notebook-id": "nb-1",
+  "notion-parent-page-id": "",
   "sync-direction": "bidirectional",
-  "prop-name": "Name",
-  "prop-edgeever-id": "EdgeEver ID",
-  "prop-notebook-id": "EdgeEver Notebook ID",
-  "prop-tags": "Tags",
-  "prop-content-hash": "Content Hash",
-  "prop-last-synced": "Last Synced",
-  "prop-sync-status": "Sync Status",
-  "prop-edgeever-updated": "EdgeEver Updated At",
   "auto-sync": false,
-  "auto-sync-delay-sec": 60,
   "upload-attachments": false,
-  "max-attachment-mb": 5,
 };
 
+/** 精简后的 schema：只有用户可见列 + 幂等必需的 EdgeEver ID。 */
 function defaultSchema() {
   return {
     Name: { type: "title", title: {} },
-    "EdgeEver ID": { type: "rich_text", rich_text: {} },
-    "EdgeEver Notebook ID": { type: "rich_text", rich_text: {} },
     Tags: { type: "multi_select", multi_select: { options: [] } },
-    "Content Hash": { type: "rich_text", rich_text: {} },
-    "Last Synced": { type: "date", date: {} },
-    "Sync Status": { type: "select", select: { options: [] } },
+    Notebook: { type: "select", select: { options: [] } },
     "EdgeEver Updated At": { type: "date", date: {} },
+    "Last Synced": { type: "date", date: {} },
+    "EdgeEver ID": { type: "rich_text", rich_text: {} },
   };
 }
 
@@ -130,7 +115,9 @@ export function createMockContext(options = {}) {
   const state = {
     settings: { ...DEFAULT_SETTINGS, ...(options.settings || {}) },
     secrets: new Map(options.secrets || []),
-    storage: new Map(),
+    storage: new Map(options.storage || []),
+    /** 模拟宿主能否通过 editor.getDocument() 给出当前笔记上下文。 */
+    currentNoteId: options.currentNoteId ?? "",
     notes: (options.notes || DEFAULT_NOTES).map((n) => ({ ...n })),
     notebooks: options.notebooks || [{ id: "nb-1", name: "工作" }, { id: "nb-2", name: "个人" }],
     resources: new Map(
@@ -170,6 +157,19 @@ export function createMockContext(options = {}) {
   };
 
   for (const p of options.pages || []) state.notion.pages.set(p.id, { ...p });
+
+  // 默认模拟「已一键生成过同步数据库」：Data Source ID 存在 context.storage，不需要用户手填。
+  // 传 noSetupRecord: true 可模拟全新安装（此时需要点一键生成）。
+  if (!options.noSetupRecord && !state.storage.has("notion-sync:setup")) {
+    state.storage.set("notion-sync:setup", {
+      databaseId: "db-00000001",
+      dataSourceId: DS_ID,
+      parentPageId: "",
+      databaseTitle: "EdgeEver Sync",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      propertyNames: ["Name", "Tags", "Notebook", "EdgeEver Updated At", "Last Synced", "EdgeEver ID"],
+    });
+  }
 
   const ctx = {
     notes: {
@@ -216,6 +216,11 @@ export function createMockContext(options = {}) {
       async list(noteId) { return (state.resources.get(noteId) || []).map((r) => ({ ...r })); },
       async read(resourceId) {
         return new Blob([new Uint8Array([1, 2, 3, 4])], { type: "image/png" });
+      },
+    },
+    editor: options.noEditor ? undefined : {
+      async getDocument() {
+        return state.currentNoteId ? { noteId: state.currentNoteId } : null;
       },
     },
     settings: {
@@ -314,7 +319,7 @@ export function createMockContext(options = {}) {
     assert.ok(root, "panel root should exist");
     const handlers = root.listeners.change || [];
     for (const h of handlers) {
-      await h({ target: { dataset: { control }, ...extra } });
+      await h({ target: { dataset: { control, ...extra }, ...extra } });
     }
     await waitForIdle(state, root);
   };

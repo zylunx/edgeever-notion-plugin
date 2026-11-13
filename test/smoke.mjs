@@ -42,7 +42,7 @@ function noteById(state, id) { return state.notes.find((n) => n.id === id); }
 // ---------------------------------------------------------------- 1. 生命周期
 test("注册命令与面板，activate 返回的清理函数可注销", async () => {
   const { state, dispose } = await setup();
-  assert.equal(state.commands.size, 3, "应注册 3 个命令");
+  assert.equal(state.commands.size, 4, "应注册 4 个命令（含同步单篇笔记）");
   assert.equal(state.panels.size, 1, "应注册 1 个面板");
   assert.ok(state.events.has("note.deleted"));
   dispose();
@@ -93,12 +93,22 @@ test("401 时给出 Token 提示且不重试", async () => {
   } finally { dispose(); }
 });
 
-test("只填数据库 ID 时自动解析 Data Source ID", async () => {
-  const { state, dispose } = await setup({ settings: { "notion-data-source-id": "" } });
+test("设置界面只保留必要字段；Data Source ID 由后台记录自动提供", async () => {
+  const manifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
+  const keys = manifest.settings.fields.map((f) => f.key);
+  assert.deepEqual(keys, [
+    "notion-token", "notion-parent-page-id", "sync-direction", "auto-sync", "upload-attachments",
+  ], "数据库 ID / Data Source ID / API 地址 / 属性名等不应再暴露给用户");
+  const { state, dispose } = await setup();
   try {
+    assert.equal(state.settings["notion-data-source-id"], undefined);
+    assert.equal(state.settings["notion-database-id"], undefined);
+    assert.equal(state.settings["api-base-url"], undefined);
     await preview(state);
-    assert.ok(state.fetchCalls.some((c) => c.url.includes("/v1/databases/db-00000001")));
-    assert.ok(state.fetchCalls.some((c) => c.url.includes(`/v1/data_sources/${DS_ID}/query`)));
+    assert.ok(
+      state.fetchCalls.some((c) => c.url.includes(`/v1/data_sources/${DS_ID}/query`)),
+      "用户不填任何 ID，后台记录仍应提供 Data Source",
+    );
   } finally { dispose(); }
 });
 
@@ -290,7 +300,7 @@ test("删除只标记映射，不永久删除任一端数据", async () => {
 });
 
 test("自动同步在首次手动同步之前不发起网络请求", async () => {
-  const { state, dispose } = await setup({ settings: { "auto-sync": true, "auto-sync-delay-sec": 5 } });
+  const { state, dispose } = await setup({ settings: { "auto-sync": true } });
   try {
     await state.emit("note.updated", { note: { id: "note-1" } });
     await new Promise((r) => setTimeout(r, 60));
@@ -338,17 +348,21 @@ test("开启附件上传后上传并挂载；内容变更时复用同一上传�
 });
 
 // ---------------------------------------------------------------- 6.5 一键生成同步数据库
-function freshSetupSettings(extra = {}) {
+/** 全新安装：没有后台生成记录，只填父页面 ID。 */
+function freshSetup(extra = {}) {
+  const { settings: extraSettings = {}, ...rest } = extra;
   return {
-    "notion-data-source-id": "",
-    "notion-database-id": "",
-    "notion-parent-page-id": "https://www.notion.so/My-Page-1234567890abcdef1234567890abcdef",
-    ...extra,
+    settings: {
+      "notion-parent-page-id": "https://www.notion.so/My-Page-1234567890abcdef1234567890abcdef",
+      ...extraSettings,
+    },
+    noSetupRecord: true,
+    ...rest,
   };
 }
 
 test("一键生成：填父页面 ID 后自动建库、建全属性并保存 Data Source ID", async () => {
-  const { state, dispose } = await setup({ settings: freshSetupSettings() });
+  const { state, dispose } = await setup(freshSetup());
   try {
     await state.click("setup");
     assert.equal(state.notion.createDatabaseCalls, 1, "应调用一次 POST /v1/databases");
@@ -358,11 +372,14 @@ test("一键生成：填父页面 ID 后自动建库、建全属性并保存 Dat
     assert.ok(Array.isArray(body.title) && body.title[0].text.content, "应带数据库标题");
     const props = body.initial_data_source.properties;
     assert.equal(props.Name.title !== undefined, true, "Name 应为 title");
-    assert.equal(props["EdgeEver ID"].rich_text !== undefined, true, "EdgeEver ID 应为 rich_text");
     assert.equal(props.Tags.multi_select !== undefined, true, "Tags 应为 multi_select");
-    assert.equal(props["Sync Status"].select !== undefined, true, "Sync Status 应为 select");
+    assert.equal(props.Notebook.select !== undefined, true, "Notebook 应为 select，便于按笔记本筛选");
     assert.equal(props["Last Synced"].date !== undefined, true, "Last Synced 应为 date");
-    assert.equal(Object.keys(props).length, 8, "应创建 8 个属性");
+    assert.equal(props["EdgeEver ID"].rich_text !== undefined, true, "EdgeEver ID 应为 rich_text（幂等必需）");
+    assert.equal(props["Content Hash"], undefined, "Hash 等技术列不应再创建");
+    assert.equal(props["Sync Status"], undefined);
+    assert.equal(props["EdgeEver Notebook ID"], undefined);
+    assert.equal(Object.keys(props).length, 6, "应只创建 6 个属性");
 
     const record = state.storage.get("notion-sync:setup");
     assert.ok(record?.dataSourceId?.startsWith("ds-gen-"), "Data Source ID 应自动保存");
@@ -375,7 +392,7 @@ test("一键生成：填父页面 ID 后自动建库、建全属性并保存 Dat
 });
 
 test("一键生成后无需手填 ID 即可测试连接并完成首次同步", async () => {
-  const { state, dispose } = await setup({ settings: freshSetupSettings() });
+  const { state, dispose } = await setup(freshSetup());
   try {
     await state.click("setup");
     const dsId = state.storage.get("notion-sync:setup").dataSourceId;
@@ -388,15 +405,12 @@ test("一键生成后无需手填 ID 即可测试连接并完成首次同步", a
 });
 
 test("重复点击不重复建库；缺失属性只补齐且不改已有属性", async () => {
-  const { state, dispose } = await setup({
-    settings: freshSetupSettings(),
-    setupMissingProps: ["Content Hash"],
-  });
+  const { state, dispose } = await setup(freshSetup({ setupMissingProps: ["Notebook"] }));
   try {
     await state.click("setup");
     assert.equal(state.notion.createDatabaseCalls, 1);
     assert.equal(state.notion.patchDataSourceCalls, 1, "应补齐缺失属性");
-    assert.ok(state.notion.lastPatchBody.properties["Content Hash"], "只补缺失的 Content Hash");
+    assert.ok(state.notion.lastPatchBody.properties.Notebook, "只补缺失的 Notebook");
     assert.equal(state.notion.lastPatchBody.properties.Name, undefined, "不得重写已有属性");
     await state.click("setup");
     assert.equal(state.notion.createDatabaseCalls, 1, "第二次点击不得再建库");
@@ -406,9 +420,7 @@ test("重复点击不重复建库；缺失属性只补齐且不改已有属性",
 });
 
 test("未填父页面 ID 时给出提示，且不发起任何网络请求", async () => {
-  const { state, dispose } = await setup({
-    settings: { "notion-data-source-id": "", "notion-database-id": "", "notion-parent-page-id": "" },
-  });
+  const { state, dispose } = await setup(freshSetup({ settings: { "notion-parent-page-id": "" } }));
   try {
     await state.click("setup");
     assert.equal(state.fetchCalls.length, 0);
@@ -418,7 +430,7 @@ test("未填父页面 ID 时给出提示，且不发起任何网络请求", asyn
 });
 
 test("403 缺少 Insert content 时给出能力与授权指引", async () => {
-  const { state, dispose } = await setup({ settings: freshSetupSettings(), setupForbidden: true });
+  const { state, dispose } = await setup(freshSetup({ setupForbidden: true }));
   try {
     await state.click("setup");
     const html = state.panelRoots.at(-1).root.innerHTML;
@@ -429,7 +441,7 @@ test("403 缺少 Insert content 时给出能力与授权指引", async () => {
 });
 
 test("404 父页面不存在或未共享时给出 Connections 指引", async () => {
-  const { state, dispose } = await setup({ settings: freshSetupSettings(), setupNotFound: true });
+  const { state, dispose } = await setup(freshSetup({ setupNotFound: true }));
   try {
     await state.click("setup");
     const html = state.panelRoots.at(-1).root.innerHTML;
@@ -438,19 +450,19 @@ test("404 父页面不存在或未共享时给出 Connections 指引", async () 
   } finally { dispose(); }
 });
 
-test("手填 Data Source ID 时一键生成只补属性，不新建也不写生成记录", async () => {
-  const { state, dispose } = await setup({ setupMissingProps: ["Content Hash"] });
+test("已有后台生成记录时一键生成只补属性、不新建数据库", async () => {
+  const { state, dispose } = await setup({ setupMissingProps: ["Notebook"] });
   try {
     await state.click("setup");
-    assert.equal(state.notion.createDatabaseCalls, 0, "手写目标优先，不得新建");
+    assert.equal(state.notion.createDatabaseCalls, 0, "已有记录不得新建");
     assert.equal(state.notion.patchDataSourceCalls, 1);
-    assert.equal(state.storage.get("notion-sync:setup"), undefined, "不得写入自动生成记录覆盖手写配置");
-    assert.ok(state.panelRoots.at(-1).root.innerHTML.includes("手动指定"));
+    assert.ok(state.storage.get("notion-sync:setup")?.dataSourceId, "后台记录保持不变");
+    assert.ok(state.panelRoots.at(-1).root.innerHTML.includes("未重复建库"));
   } finally { dispose(); }
 });
 
 test("已生成的库无法访问时报错而不自动新建，避免重复数据库", async () => {
-  const { state, dispose } = await setup({ settings: freshSetupSettings() });
+  const { state, dispose } = await setup(freshSetup());
   try {
     await state.click("setup");
     const dsId = state.storage.get("notion-sync:setup").dataSourceId;
@@ -458,6 +470,108 @@ test("已生成的库无法访问时报错而不自动新建，避免重复数�
     await state.click("setup");
     assert.equal(state.notion.createDatabaseCalls, 1, "不得因为旧库不可访问而新建");
     assert.ok(state.panelRoots.at(-1).root.innerHTML.includes("无法访问"));
+  } finally { dispose(); }
+});
+
+// ---------------------------------------------------------------- 6.6 多选笔记本 / 单篇同步 / 精简列
+const MULTI_NOTES = [
+  { id: "a", title: "工作笔记", kind: "text", notebookId: "nb-1", tags: [], contentMarkdown: "A 正文", updatedAt: "2026-01-01T00:00:00.000Z" },
+  { id: "b", title: "个人笔记", kind: "text", notebookId: "nb-2", tags: [], contentMarkdown: "B 正文", updatedAt: "2026-01-01T00:00:00.000Z" },
+  { id: "c", title: "归档笔记", kind: "text", notebookId: "nb-3", tags: [], contentMarkdown: "C 正文", updatedAt: "2026-01-01T00:00:00.000Z" },
+];
+const MULTI_NOTEBOOKS = [
+  { id: "nb-1", name: "工作" },
+  { id: "nb-2", name: "个人" },
+  { id: "nb-3", name: "归档" },
+];
+function multiSetup(extra = {}) {
+  return setup({ notes: MULTI_NOTES, notebooks: MULTI_NOTEBOOKS, ...extra });
+}
+
+test("勾选单个笔记本时只同步该笔记本的笔记", async () => {
+  const { state, dispose } = await multiSetup();
+  try {
+    await state.change("notebook", { id: "nb-1", checked: true });
+    assert.deepEqual(state.storage.get("notion-sync:notebooks"), ["nb-1"]);
+    await firstSync(state);
+    assert.equal(state.notion.pages.size, 1);
+    assert.ok(markdownOf(state, [...state.notion.pages.keys()][0]).includes("A 正文"));
+  } finally { dispose(); }
+});
+
+test("勾选多个笔记本时同步两边；清空选择后恢复同步全部", async () => {
+  const { state, dispose } = await multiSetup();
+  try {
+    await state.change("notebook", { id: "nb-1", checked: true });
+    await state.change("notebook", { id: "nb-2", checked: true });
+    assert.deepEqual(new Set(state.storage.get("notion-sync:notebooks")), new Set(["nb-1", "nb-2"]));
+    await firstSync(state);
+    assert.equal(state.notion.pages.size, 2);
+
+    await state.click("clear-notebooks");
+    assert.deepEqual(state.storage.get("notion-sync:notebooks"), []);
+    await preview(state);
+    assert.ok(state.panelRoots.at(-1).root.innerHTML.includes("新增 1"), "清空后应重新纳入第 3 个笔记本");
+  } finally { dispose(); }
+});
+
+test("同步时把笔记本名称写入 Notion 的 Notebook 属性，且不再写技术列", async () => {
+  const { state, dispose } = await setup();
+  try {
+    await firstSync(state);
+    for (const page of state.notionPageList()) {
+      assert.equal(page.properties.Notebook.select.name, "工作");
+      assert.equal(page.properties["Content Hash"], undefined);
+      assert.equal(page.properties["Sync Status"], undefined);
+      assert.equal(page.properties["EdgeEver Notebook ID"], undefined);
+    }
+  } finally { dispose(); }
+});
+
+test("「同步单篇笔记」命令：宿主给出当前笔记时只同步该篇", async () => {
+  const { state, dispose } = await setup({ currentNoteId: "note-1" });
+  try {
+    await state.runCommand("notion-sync-single-note");
+    assert.equal(state.notion.pages.size, 1, "只应创建这一篇对应的页面");
+    assert.ok(state.notices.some((n) => n.includes("单篇同步完成")));
+  } finally { dispose(); }
+});
+
+test("当前文档 ID 不是有效笔记时回退到选择器，不误同步", async () => {
+  const { state, dispose } = await setup({ currentNoteId: "not-a-real-note" });
+  try {
+    await state.runCommand("notion-sync-single-note");
+    assert.equal(state.fetchCalls.length, 0);
+    assert.ok(state.panelRoots.at(-1).root.innerHTML.includes("请在这里选择"));
+  } finally { dispose(); }
+});
+
+test("宿主未给出当前笔记时，单篇命令打开面板的单篇选择器", async () => {
+  const { state, dispose } = await setup({ noEditor: true });
+  try {
+    await state.runCommand("notion-sync-single-note");
+    const html = state.panelRoots.at(-1).root.innerHTML;
+    assert.ok(html.includes("请在这里选择"));
+    assert.ok(html.includes("同步此篇"));
+    assert.equal(state.fetchCalls.length, 0);
+  } finally { dispose(); }
+});
+
+test("面板里选择单篇笔记后点「同步此篇」只同步该篇", async () => {
+  const { state, dispose } = await setup();
+  try {
+    await state.change("single-note", { value: "note-1" });
+    await state.click("sync-one");
+    assert.equal(state.notion.pages.size, 1);
+    assert.ok(state.panelRoots.at(-1).root.innerHTML.includes("单篇同步完成"));
+  } finally { dispose(); }
+});
+
+test("单篇同步不会被记为全量首次同步完成", async () => {
+  const { state, dispose } = await setup({ currentNoteId: "note-1", settings: { "auto-sync": true } });
+  try {
+    await state.runCommand("notion-sync-single-note");
+    assert.equal(state.storage.get("notion-sync:state").firstSyncDone, false);
   } finally { dispose(); }
 });
 

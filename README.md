@@ -9,7 +9,7 @@
 [![Notion API](https://img.shields.io/badge/Notion%20API-2026--03--11-191919?logo=notion&logoColor=white)](https://developers.notion.com/reference/versioning)
 [![Platform](https://img.shields.io/badge/platform-web%20%7C%20desktop-2ea44f)](#)
 [![Bundle](https://img.shields.io/badge/bundle-~100%20KB%20%2F%20single%20file-informational)](#)
-[![Mock tests](https://img.shields.io/badge/mock%20tests-32%2F32-brightgreen)](#开发)
+[![Mock tests](https://img.shields.io/badge/mock%20tests-40%2F40-brightgreen)](#开发)
 
 </div>
 
@@ -23,6 +23,7 @@
 - [✨ 特性](#-特性)
 - [📦 安装](#-安装)
 - [🚀 快速开始](#-快速开始)
+- [📋 Notion 数据库列](#-notion-数据库列)
 - [⚙️ 配置项](#️-配置项)
 - [🧭 同步与冲突策略](#-同步与冲突策略)
 - [🔐 Token 与安全](#-token-与安全)
@@ -36,7 +37,10 @@
 
 | | |
 | :--- | :--- |
-| 🗄 **一键建库** | 填一个父页面 ID，点一次按钮即可创建 database + Data Source + 表格视图与全部 8 个属性，**无需手动建表、手写属性或复制任何 ID** |
+| 🗄 **一键建库** | 填一个父页面 ID，点一次按钮即可创建 database + Data Source + 表格视图与全部属性，**无需手动建表、手写属性或复制任何 ID** |
+| 🗂 **笔记本名称** | 每条同步记录写入 `Notebook`(Select)，可在 Notion 里直接按笔记本筛选 |
+| 🧩 **多范围 / 单篇同步** | 面板里可勾选**单个或多个**笔记本（不勾选 = 全部），也能对**某一篇笔记**单独同步 |
+| 🧹 **精简表格** | 默认只展示标题、标签、笔记本、时间、同步时间；Hash / 状态等技术值不再写入 Notion |
 | 👁 **只读预览** | 首次同步不会自动开始；生成同步计划后必须由用户勾选确认才写入 |
 | 🧬 **双基线冲突检测** | 分别记录两端上次成功同步的 Hash，避免 Notion 重渲染 Markdown 造成假冲突；**默认不覆盖任一端** |
 | 🔑 **稳定映射** | 以 `EdgeEver ID` 属性建立映射，绝不以标题匹配，重复同步不会重复创建页面 |
@@ -82,25 +86,26 @@ https://github.com/zylunx/edgeever-notion-plugin
 
 1. **创建 Integration** — 在 Notion 创建 Internal Integration，开启 `Read content` / `Update content` / `Insert content` 三项能力。
 2. **建一个空页面** — 不需要手动建数据库，也不需要手写属性。在该页面 `··· → Connections` 中把 Integration 加为连接。
-3. **填写插件设置**（只需两项）
+3. **填写插件设置**（日常只需两项）
    - `Notion Integration Token` — `secret` 类型，本地加密保存、不明文回显
    - `Notion 父页面 ID` — 第 2 步页面的 ID，可直接粘贴完整页面链接
+
+   其余三项（同步方向、自动同步、附件上传）保持默认即可。**Data Source ID、数据库 ID、API 地址、API 版本、Markdown 版本、属性名全部由插件内部管理**，不需要也不提供用户填写。
 4. **点击「一键生成同步数据库」** — 插件调用 `POST /v1/databases` 一次性创建 database + Data Source + 首个表格视图及全部属性，默认库名 `EdgeEver Sync`，位于该父页面下。**Data Source ID 自动保存进插件存储，无需手动复制。**
-5. **开始同步** — 选择笔记本 → `测试连接` → `生成预览` → 查看同步计划 → 勾选确认 → `执行同步`。
+5. **开始同步** — 在面板勾选笔记本（**单个或多个**，不勾选 = 全部）→ `生成预览` → 查看同步计划 → 勾选确认 → `执行同步`。
+   - 只想同步一篇：在命令面板运行「Notion 同步：同步单篇笔记」，或在面板的「单篇笔记」下拉选一篇后点「同步此篇」。
 
 <details>
-<summary><strong>自动创建的 8 个属性</strong>（名称均可在插件设置中修改）</summary>
+<summary><strong>自动创建的 6 个属性</strong>（名称固定，不可配置）</summary>
 
 | 属性名 | 类型 | 用途 |
 | :--- | :--- | :--- |
 | `Name` | Title | 笔记标题 |
-| `EdgeEver ID` | Rich text | **唯一映射键**，避免重复创建 |
-| `EdgeEver Notebook ID` | Rich text | 来源笔记本 |
 | `Tags` | Multi-select | 标签 |
-| `Content Hash` | Rich text | 规范化正文 Hash |
-| `Last Synced` | Date | 最近同步时间 |
-| `Sync Status` | Select | 同步状态 |
+| `Notebook` | Select | **笔记本名称**，便于在 Notion 里筛选 |
 | `EdgeEver Updated At` | Date | EdgeEver 侧更新时间 |
+| `Last Synced` | Date | 最近同步时间 |
+| `EdgeEver ID` | Rich text | 内部唯一映射键（幂等必需） |
 
 </details>
 
@@ -111,35 +116,46 @@ https://github.com/zylunx/edgeever-notion-plugin
 
 - 官方 OpenAPI 的 `parent` 也列了 `workspace` 选项，但正文仍要求 "parent must be a Notion page or a wiki database"，因此插件只实现 `{"type":"page_id","page_id":...}`，不尝试工作区根建库。
 - **重复点击不会重复建库**：已有生成记录时只读取 schema 并补齐缺失属性（`PATCH` 只补缺失列、不改已有列）；属性类型不匹配只警告、不自动改类型；已生成的库无法访问时报错而不自动新建。
-- 已有数据库仍可在设置里直接填 `Notion Data Source ID` 或 `Notion 数据库 ID`（填库 ID 会自动 `GET /v1/databases/{id}` 解析 `data_sources[0].id`）。**手写配置始终优先**，此时按钮只检查并补齐该库缺失属性，不新建、不覆盖手写配置。
-- 生成的 Data Source ID 与映射表存于 `context.storage`，按插件 ID 隔离；**更换插件 ID 后记录不继承**，需重新生成或手动填写。
-- 已有生成记录后，即使修改父页面 ID，点击按钮也只复用原数据库（不迁移、不另建）。需要换库请先清空插件数据，或直接手写新的 Data Source ID。
+- 生成的 Data Source ID 与映射表存于 `context.storage`，按插件 ID 隔离；**更换插件 ID 后记录不继承**，需重新一键生成。
+- 已有生成记录后，即使修改父页面 ID，点击按钮也只复用原数据库（不迁移、不另建）。需要换库请先清空插件数据再重新生成。
+
+---
+
+## 📋 Notion 数据库列
+
+**默认只展示用户关心的列**：标题、标签、笔记本、笔记时间、同步时间，加上幂等必需的 `EdgeEver ID`。`Content Hash`、`Sync Status`、`EdgeEver Notebook ID` 等技术列**不再创建**——双基线 Hash 与同步状态本来完整保存在本地 `context.storage` 的映射表里，写进 Notion 只是冗余展示。
+
+`Notebook` 是 Select 类型，写入不存在的选项时 Notion 会自动创建，因此可直接在表格视图里按笔记本筛选。
+
+> [!WARNING]
+> **Notion 公开 API 不支持隐藏视图列**：`initialDataSourceRequest` 只有 `properties`，没有 `visible` / `hidden` 字段，官方也没有视图配置端点。因此「隐藏」是通过**不创建这些列**实现的，插件无法替你调整视图。若希望连 `EdgeEver ID` 也不显示，需在 Notion 表格里手动 `··· → Properties` 关掉该列。该列必须保留：本地存储丢失时靠它反查页面，避免重复创建。
+>
+> 若此前用旧版插件生成过带 `Content Hash` 等列的数据库，插件**不会删除已有列**（避免丢数据），只补齐新增的 `Notebook`；旧列请手动隐藏或删除。
 
 ---
 
 ## ⚙️ 配置项
 
-在 EdgeEver 插件设置中由宿主统一渲染，完整字段见 [`manifest.json`](./manifest.json)。常用项：
+设置界面已精简为 **5 项**，完整字段见 [`manifest.json`](./manifest.json)：
 
 | Key | 默认值 | 说明 |
 | :--- | :--- | :--- |
 | `notion-token` | — | Integration Token（`secret`，必填） |
 | `notion-parent-page-id` | — | 一键建库的父页面 ID / 完整链接 |
-| `notion-data-source-id` | — | 可选；一键生成后由插件自动写入内部存储 |
-| `notion-database-id` | — | 可选；连接已有数据库时填写 |
-| `api-base-url` | `https://api.notion.com` | 自建反向代理时填写 |
-| `notion-version` | `2026-03-11` | Notion API 版本 |
-| `markdown-version` | `v2` | Notion-flavored Markdown（`v1` 已弃用） |
 | `sync-direction` | `bidirectional` | 双向 / 仅推送 / 仅拉取 |
 | `auto-sync` | `false` | 事件防抖自动同步，仅在首次手动同步后对已有映射生效 |
 | `upload-attachments` | `false` | 上传图片与普通附件 |
-| `max-attachment-mb` | `5` | 单个附件大小上限 |
-| `prop-*` | 见清单 | 8 个 Notion 属性名，可自由改名 |
+
+**已移除的用户配置项**（改为插件内部管理）：`notion-data-source-id`、`notion-database-id`、`api-base-url`、`notion-version`、`markdown-version`、`sync-notebook-id`、`prop-*`（8 个属性名）、`auto-sync-delay-sec`、`max-attachment-mb`。
+
+内部固定值：API 地址 `https://api.notion.com`、版本 `2026-03-11`、Markdown `v2`、自动同步防抖 60 s、单附件上限 5 MB、6 个固定属性名。笔记本多选与 Data Source ID 都保存在 `context.storage`，不占设置界面。
 
 ---
 
 ## 🧭 同步与冲突策略
 
+- **笔记本多选**：面板可勾选**单个或多个**笔记本（不勾选 = 全部），多个笔记本的查询结果按 ID 去重；选择存在 `context.storage`，不在设置界面里。
+- **单篇同步**：命令「Notion 同步：同步单篇笔记」或面板的单篇下拉，可以只同步某一篇笔记，跳过 Notion 侧独有页面扫描；用户主动触发即视为确认，但冲突仍不自动覆盖，也不会被标记为「全量首次同步完成」。
 - **稳定映射**：以 `EdgeEver ID` 建立映射，存于 `context.storage`（按插件与工作区隔离），绝不以标题匹配。
 - **规范化 Hash**：统一换行 / 行尾空白 / 列表符号、剥离插件维护的附件区，不混入同步时间、Page ID 等元数据。
 - **双基线三方比较**：分别保存上次成功同步时 EdgeEver 侧与 Notion 侧的 Hash，判定为「无变化 / 仅推送 / 仅拉取 / 两端一致更新基线 / 冲突」，规避 Notion 重渲染 Markdown 造成的假冲突。
@@ -157,7 +173,8 @@ https://github.com/zylunx/edgeever-notion-plugin
 - Token 只从 `context.secrets` 或 manifest 中 `type: "secret"` 的设置字段读取；**不写入 `context.storage`、普通设置、日志、通知或同步报告**。
 - 所有对外展示的错误文本都经过脱敏；`Authorization` 头只在请求中构造，不落盘。
 - `permissions` 按实际使用最小化声明，未声明 `notes:delete`、`resources:write`、`schedules` 等未使用权限。
-- **自建代理**：`api-base-url` 默认 `https://api.notion.com`。EdgeEver 文档明确标准请求受宿主环境 CORS 策略约束；若 Web 端直连被拦截，可显式填写自建反向代理地址。注意此时 **Token 会发往该代理**，请自行确认部署架构与信任边界后再启用。设置项本身不默认指向任何第三方。
+- **固定官方地址**：插件只请求 `https://api.notion.com`，不提供、也不默认指向任何第三方代理。EdgeEver 文档明确标准请求受宿主环境 CORS 策略约束，Web 端若被拦截需由宿主环境解决。
+- **当前笔记探测**：单篇同步命令只读取文档化的 `context.editor.getDocument()`，且必须用 `notes.get()` 验证候选 ID 确实是工作区笔记；验证失败就回退到面板的单篇选择器，不会把文档 ID 误当笔记 ID 同步。
 
 > [!CAUTION]
 > 客户端插件采用受信任代码模型：启用即代表信任其在客户端 JavaScript 环境中运行。清单中的 `permissions` 用于向用户披露能力范围，不构成强制安全沙箱。
@@ -187,7 +204,7 @@ https://github.com/zylunx/edgeever-notion-plugin
 | 限流 | 429 / 529 读 `Retry-After`（或 `additional_data.retry_after`）等待后重试；写请求 5xx 不自动重放 | Request limits |
 | Markdown 语法 | `markdown_version: "v2"` = Notion-flavored Markdown（CommonMark + GFM + Notion XML 标签） | Notion-flavored Markdown format |
 
-EdgeEver 侧按官方插件开发文档实现：`activate(context)` 默认导出并返回清理函数、`settingsUi: "host"` + `settings.fields` Schema、`context.settings / secrets / storage / network / notes / notebooks / resources / events / commands / ui.panels`。
+EdgeEver 侧按官方插件开发文档实现：`activate(context)` 默认导出并返回清理函数、`settingsUi: "host"` + `settings.fields` Schema、`context.settings / secrets / storage / network / notes / notebooks / editor / resources / events / commands / ui.panels`。
 
 </details>
 
@@ -199,11 +216,11 @@ EdgeEver 侧按官方插件开发文档实现：`activate(context)` 默认导出
 npm install
 npm run typecheck   # tsc --noEmit
 npm run build       # esbuild → 单文件 main.js
-npm test            # build + 32 项 Mock 冒烟测试
+npm test            # build + 40 项 Mock 冒烟测试
 npm run check       # typecheck + test
 ```
 
-`test/mock.mjs` 提供 Mock 宿主与 Mock Notion API；`test/smoke.mjs` 覆盖连接测试、401/429、预览只读、首次确认、重复同步不重复创建、双向更新、冲突不覆盖、人工解决、分页、截断保护、软删除、附件去重、**一键建库（链接解析、全属性 schema、自动保存 ID、幂等补属性、403/404 指引、手写目标优先、旧库失效不重建）**、Token 不泄露、bundle 大小等验收项。当前 **32/32 通过**。
+`test/mock.mjs` 提供 Mock 宿主与 Mock Notion API；`test/smoke.mjs` 覆盖连接测试、401/429、预览只读、首次确认、重复同步不重复创建、双向更新、冲突不覆盖、人工解决、分页、截断保护、软删除、附件去重、**一键建库（链接解析、精简属性 schema、自动保存 ID、幂等补属性、403/404 指引、旧库失效不重建）**、**笔记本多选（单个 / 多个 / 清空恢复全部）**、**单篇同步（当前笔记上下文、无效 ID 回退、面板选择器、不提前打开自动同步）**、设置项精简、笔记本名称写入、Token 不泄露、bundle 大小等验收项。当前 **40/40 通过**。
 
 ### 项目结构
 
@@ -245,6 +262,8 @@ npm run check       # typecheck + test
 - Android / iOS 原生端支持。
 - 工作区根建库（`parent: {"type":"workspace"}`）：官方正文仍要求父页面，插件只实现 `page_id`。
 - 代替用户在 Notion 里把 Integration 加到页面 Connections：授权必须由用户在工作区完成，API 无此能力。
+- **视图列可见性与自定义属性名**：Notion 公开 API 没有视图配置端点，无法设置列隐藏；属性名改为固定常量，避免用户改名后写入失败。技术列通过「不创建」实现隐藏，详见 [📋 Notion 数据库列](#-notion-数据库列)。
+- **「右键某篇笔记直接同步」**：官方 `context.commands.register` 的 `run()` 不接收参数，也没有文档化的当前笔记 ID 接口，因此实现为「当前文档防御性探测 + 单篇选择器」，不伪造笔记上下文。
 
 附件上传**默认关闭**：正文中会把 EdgeEver 本地资源引用改写为 `EE-ATTACH:<资源ID>|<文件名>` 可追溯占位并报告；开启后才上传到 Notion，并在页面末尾追加由 `EE-ATTACHMENTS-START/END` 包裹、由插件维护的附件区（该区不参与正文 Hash）。
 

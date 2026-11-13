@@ -7,6 +7,7 @@ import type {
   SyncPlanItem,
   SyncReport,
   NotionPage,
+  PluginNotebook,
 } from "../types";
 import { NotionClient, NotionError } from "../notion/client";
 import { RequestQueue } from "./queue";
@@ -23,6 +24,7 @@ import {
   optionalProperties,
   patchProperties,
   plainText,
+  readNotebookName,
   readTags,
   readTitle,
   requiredProperties,
@@ -51,9 +53,12 @@ import {
   listNotes,
   listNotebooks,
   listResources,
+  noteNotebookId,
   noteTags,
   noteTitle,
+  notebookNameMap,
   noteUpdatedAt,
+  pickTargetNotebookId,
   updateNote,
 } from "../edgeever/notes";
 import { errMsg, nowIso, redact } from "../util";
@@ -82,6 +87,7 @@ interface ApplyTask {
   client: NotionClient;
   dataSourceId: string;
   mappings: Record<string, NoteMapping>;
+  notebooks: PluginNotebook[];
   item: SyncPlanItem;
   resolution: ConflictResolution;
   maxFileUploadBytes?: number;
@@ -178,17 +184,40 @@ export class SyncEngine {
   }
 
   /**
+   * 同步单篇笔记：用户主动对某一篇触发即视为确认，直接执行。
+   * 冲突仍不自动覆盖（保持默认策略），会提示用户打开面板处理；
+   * 不把该次执行标记为「全量首次同步完成」，避免提前打开自动同步。
+   */
+  async syncOneNote(noteId: string): Promise<{ message: string; report: SyncReport }> {
+    if (!noteId) throw new Error("请先选择要同步的笔记。");
+    const note = await this.ctx.notes.get(noteId).catch(() => null);
+    if (!note) throw new Error("找不到该笔记，请刷新后重试。");
+    const result = await this.preview({ noteIds: [noteId] });
+    const blocked = result.plan.filter((i) => i.action === "conflict").length;
+    const actionable = result.plan.filter((i) => i.action !== "conflict");
+    const report = await this.apply(actionable, {}, undefined, { markFirstSync: false });
+    const c = report.counts;
+    const parts = [`新增 ${c.created}`, `更新 ${c.updated}`, `跳过 ${c.skipped}`, `失败 ${c.failed}`];
+    if (blocked) parts.push(`冲突 ${blocked} 项未覆盖（请打开同步面板处理）`);
+    if (result.warnings.length) parts.push(`提示 ${result.warnings.length} 条`);
+    return { message: `单篇同步完成：${parts.join("、")}。`, report };
+  }
+
+  /**
    * 只读预览。首次全量同步必须先经过这里（规范 §14）。
    * auto=true 时只保留「已有映射且可安全单向更新」的条目，供自动同步使用。
    */
-  async preview(options: { auto?: boolean } = {}): Promise<PreviewResult> {
+  async preview(options: { auto?: boolean; noteIds?: string[] } = {}): Promise<PreviewResult> {
     const auto = options.auto === true;
+    /** 单篇同步：只处理这一篇，并且不把 Notion 侧独有页面拉进计划。 */
+    const singleIds = options.noteIds?.length ? new Set(options.noteIds) : undefined;
     const { settings, client, dataSourceId } = await this.setup();
     const warnings: string[] = [];
     const counts = emptyCounts();
     const plan: SyncPlanItem[] = [];
     const mappings = await loadMappings(this.ctx);
     const notebooks = await listNotebooks(this.ctx);
+    const nameById = notebookNameMap(notebooks);
 
     if (auto) {
       const state = await loadState(this.ctx);
@@ -197,9 +226,11 @@ export class SyncEngine {
       }
     }
 
-    const scan = await listNotes(this.ctx, settings.notebookId);
+    const scan = await listNotes(this.ctx, settings.notebookIds);
     warnings.push(...scan.warnings);
-    for (const note of scan.unsupported) {
+    const supported = singleIds ? scan.supported.filter((n) => singleIds.has(n.id)) : scan.supported;
+    const unsupported = singleIds ? scan.unsupported.filter((n) => singleIds.has(n.id)) : scan.unsupported;
+    for (const note of unsupported) {
       const item: SyncPlanItem = {
         key: note.id,
         action: "unsupported",
@@ -227,14 +258,15 @@ export class SyncEngine {
       const eeId = plainText(page.properties?.[settings.props.edgeeverId]).trim();
       if (eeId) pageByEeId.set(eeId, page);
     }
-    const knownEeIds = new Set(scan.supported.map((n) => n.id));
+    const knownEeIds = new Set(supported.map((n) => n.id));
 
     // ---------- EdgeEver → 计划项 ----------
-    for (const note of scan.supported) {
+    for (const note of supported) {
       const resources = await listResources(this.ctx, note.id);
       const title = noteTitle(note);
       const tags = noteTags(note);
       const mapping = mappings[note.id];
+      const nbId = noteNotebookId(note);
       const base: SyncPlanItem = {
         key: note.id,
         action: "skip",
@@ -242,6 +274,8 @@ export class SyncEngine {
         reason: "",
         edgeeverNoteId: note.id,
         notionPageId: mapping?.notionPageId,
+        notebookId: nbId,
+        notebookName: nameById.get(nbId) ?? "",
         note,
         noteTitle: title,
         tags,
@@ -371,8 +405,8 @@ export class SyncEngine {
       }
     }
 
-    // ---------- Notion 侧独有页面 ----------
-    for (const page of activePages) {
+    // ---------- Notion 侧独有页面（单篇同步时只处理目标笔记，不扫其它远端页面） ----------
+    if (!singleIds) for (const page of activePages) {
       const eeId = plainText(page.properties?.[settings.props.edgeeverId]).trim();
       if (eeId && knownEeIds.has(eeId)) continue; // 已在上面处理
       const title = readTitle(page, settings.props.name) || `Notion 页面 ${page.id.slice(0, 8)}`;
@@ -435,8 +469,10 @@ export class SyncEngine {
     plan: SyncPlanItem[],
     resolutions: Record<string, ConflictResolution> = {},
     onProgress?: ProgressFn,
+    options: { markFirstSync?: boolean } = {},
   ): Promise<SyncReport> {
     const { settings, client, dataSourceId } = await this.setup();
+    const notebooks = await listNotebooks(this.ctx);
     const report: SyncReport = {
       startedAt: nowIso(),
       finishedAt: "",
@@ -461,6 +497,7 @@ export class SyncEngine {
           client,
           dataSourceId,
           mappings,
+          notebooks,
           item,
           resolution,
           maxFileUploadBytes,
@@ -484,9 +521,11 @@ export class SyncEngine {
 
     await saveMappings(this.ctx, mappings);
     report.finishedAt = nowIso();
+    const state = await loadState(this.ctx);
     await saveState(this.ctx, {
-      ...(await loadState(this.ctx)),
-      firstSyncDone: true,
+      ...state,
+      // 单篇同步不算「全量首次同步完成」，避免提前打开自动同步。
+      firstSyncDone: options.markFirstSync === false ? state.firstSyncDone : true,
       lastSyncAt: report.finishedAt,
     });
     await saveReport(this.ctx, report);
@@ -537,7 +576,7 @@ export class SyncEngine {
     mappings[noteId] = {
       edgeeverNoteId: noteId,
       notionPageId: pageId,
-      edgeeverNotebookId: settings.notebookId,
+      edgeeverNotebookId: item.notebookId ?? settings.notebookIds[0] ?? "",
       lastSyncedHash: eHash,
       lastEdgeEverHash: eHash,
       lastNotionHash: nHash,
@@ -564,7 +603,7 @@ export class SyncEngine {
       edgeeverId: noteId,
       markdown: item.markdown ?? "",
     });
-    const warnings = await this.writeMetadata(task, page.id, noteId, "Synced");
+    const warnings = await this.writeMetadata(task, page.id, noteId);
     const attach = await syncAttachments({
       ctx: this.ctx,
       client,
@@ -599,7 +638,7 @@ export class SyncEngine {
     }
 
     await replacePageMarkdown(client, pageId, item.markdown ?? "", settings.markdownVersion);
-    const warnings = await this.writeMetadata(task, pageId, noteId, "Synced");
+    const warnings = await this.writeMetadata(task, pageId, noteId);
     const attach = await syncAttachments({
       ctx: this.ctx,
       client,
@@ -629,8 +668,13 @@ export class SyncEngine {
       return { action: "skip", message: "该页面已建立映射，跳过创建 EdgeEver 笔记。" };
     }
 
+    const notebookId = pickTargetNotebookId(
+      settings.notebookIds,
+      task.notebooks,
+      readNotebookName(page.properties?.[settings.props.notebook]),
+    );
     const created = await createNote(this.ctx, {
-      notebookId: settings.notebookId,
+      notebookId,
       title: item.noteTitle ?? item.title,
       contentMarkdown: item.markdown ?? "",
       tags: item.tags ?? [],
@@ -638,7 +682,12 @@ export class SyncEngine {
     const noteId = created.id;
     const warnings: string[] = [];
     try {
-      await patchProperties(client, pageId, requiredProperties(settings, item.noteTitle ?? item.title, noteId));
+      await patchProperties(client, pageId, {
+        ...requiredProperties(settings, item.noteTitle ?? item.title, noteId),
+        ...optionalProperties(settings, {
+          notebookName: item.notebookName || notebookNameMap(task.notebooks).get(notebookId),
+        }),
+      });
     } catch (e) {
       warnings.push(`回写 EdgeEver ID 到 Notion 属性失败：${redact(errMsg(e), settings.token)}（下次同步可能重复创建，请检查属性名与类型）`);
     }
@@ -665,13 +714,16 @@ export class SyncEngine {
       contentMarkdown: item.markdown ?? "",
       tags: item.tags ?? [],
     });
-    const warnings = await this.writeMetadata(task, pageId, noteId, "Synced");
+    const warnings = await this.writeMetadata(task, pageId, noteId);
     warnings.push(...(await this.finalize(task, noteId, pageId, item.markdown ?? "")));
     return { action: "update-edgeever", message: `已更新 EdgeEver 笔记 ${noteId}。`, warnings };
   }
 
-  /** 属性更新分两步：必需属性、可选属性；失败只记警告，不回滚已成功的正文写入。 */
-  private async writeMetadata(task: ApplyTask, pageId: string, noteId: string, status: string): Promise<string[]> {
+  /**
+   * 属性更新分两步：必需属性、用户可见的元数据；失败只记警告，不回滚已成功的正文写入。
+   * Hash / 同步状态等技术值只存本地 mapping，不写入 Notion 表格。
+   */
+  private async writeMetadata(task: ApplyTask, pageId: string, noteId: string): Promise<string[]> {
     const { settings, client, item } = task;
     const warnings: string[] = [];
     try {
@@ -681,17 +733,15 @@ export class SyncEngine {
     }
     try {
       const optional = optionalProperties(settings, {
-        notebookId: settings.notebookId,
+        notebookName: item.notebookName,
         tags: item.tags ?? [],
-        contentHash: item.edgeeverHash,
         lastSynced: nowIso(),
-        syncStatus: status,
         edgeeverUpdated: (item.note ? noteUpdatedAt(item.note) : undefined) ?? nowIso(),
       });
       await patchProperties(client, pageId, optional);
     } catch (e) {
       warnings.push(
-        `更新可选属性失败（请检查数据库中 Tags/Hash/Last Synced/Sync Status 的类型）：${redact(errMsg(e), settings.token)}`,
+        `更新展示属性失败（请检查数据库中 Tags / Notebook / Last Synced / EdgeEver Updated At 的类型）：${redact(errMsg(e), settings.token)}`,
       );
     }
     return warnings;
@@ -716,7 +766,7 @@ export class SyncEngine {
     mappings[noteId] = {
       edgeeverNoteId: noteId,
       notionPageId: pageId,
-      edgeeverNotebookId: settings.notebookId,
+      edgeeverNotebookId: item.notebookId ?? settings.notebookIds[0] ?? "",
       lastSyncedHash: eHash,
       lastEdgeEverHash: eHash,
       lastNotionHash: nHash,

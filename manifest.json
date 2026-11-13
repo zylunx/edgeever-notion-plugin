@@ -18,6 +18,7 @@
     "notes:read",
     "notes:write",
     "metadata:read",
+    "editor:read",
     "resources:read",
     "storage",
     "secrets",
@@ -30,32 +31,13 @@
     "fields": [
       { "key": "notion-token", "type": "secret", "label": "Notion Integration Token（仅存于加密凭据区）", "required": true },
       { "key": "notion-parent-page-id", "type": "text", "label": "Notion 父页面 ID（可粘贴页面链接；用于一键生成同步数据库。需先在该页面「Connections」中添加 Integration）" },
-      { "key": "notion-database-id", "type": "text", "label": "Notion 数据库 ID（可选；连接已有数据库时填写，插件会自动解析 Data Source）" },
-      { "key": "notion-data-source-id", "type": "text", "label": "Notion Data Source ID（可选；一键生成后由插件自动保存，无需手动复制）" },
-      { "key": "api-base-url", "type": "text", "label": "API 基础地址（默认官方；自建代理才会把 Token 发往该地址）", "default": "https://api.notion.com" },
-      { "key": "notion-version", "type": "text", "label": "Notion API 版本", "default": "2026-03-11" },
-      { "key": "markdown-version", "type": "select", "label": "Markdown 语法版本", "default": "v2", "options": [
-        { "value": "v2", "label": "v2（Notion-flavored，推荐）" },
-        { "value": "v1", "label": "v1（兼容旧版，已弃用）" }
-      ] },
-      { "key": "sync-notebook-id", "type": "text", "label": "同步的 EdgeEver 笔记本 ID（也可在面板中选择）" },
       { "key": "sync-direction", "type": "select", "label": "同步方向", "default": "bidirectional", "options": [
         { "value": "bidirectional", "label": "双向（冲突需人工处理）" },
         { "value": "push", "label": "仅推送到 Notion" },
         { "value": "pull", "label": "仅拉取到 EdgeEver" }
       ] },
-      { "key": "prop-name", "type": "text", "label": "属性名：标题", "default": "Name" },
-      { "key": "prop-edgeever-id", "type": "text", "label": "属性名：EdgeEver ID", "default": "EdgeEver ID" },
-      { "key": "prop-notebook-id", "type": "text", "label": "属性名：笔记本 ID", "default": "EdgeEver Notebook ID" },
-      { "key": "prop-tags", "type": "text", "label": "属性名：标签", "default": "Tags" },
-      { "key": "prop-content-hash", "type": "text", "label": "属性名：内容 Hash", "default": "Content Hash" },
-      { "key": "prop-last-synced", "type": "text", "label": "属性名：最近同步时间", "default": "Last Synced" },
-      { "key": "prop-sync-status", "type": "text", "label": "属性名：同步状态", "default": "Sync Status" },
-      { "key": "prop-edgeever-updated", "type": "text", "label": "属性名：EdgeEver 更新时间", "default": "EdgeEver Updated At" },
       { "key": "auto-sync", "type": "boolean", "label": "自动同步（仅在完成过首次手动同步后生效，冲突仍不自动覆盖）", "default": false },
-      { "key": "auto-sync-delay-sec", "type": "text", "label": "自动同步防抖秒数", "default": "60" },
-      { "key": "upload-attachments", "type": "boolean", "label": "上传图片与普通附件到 Notion（默认关闭；正文保留可追溯占位）", "default": false },
-      { "key": "max-attachment-mb", "type": "text", "label": "单个附件大小上限（MB）", "default": "5" }
+      { "key": "upload-attachments", "type": "boolean", "label": "上传图片与普通附件到 Notion（默认关闭；正文保留可追溯占位）", "default": false }
     ]
   }
 }

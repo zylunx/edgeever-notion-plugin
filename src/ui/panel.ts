@@ -5,14 +5,16 @@ import type {
   SyncPlanItem,
   SyncReport,
 } from "../types";
-import { loadSettings, isCustomApiBase } from "../config/settings";
+import { loadSettings } from "../config/settings";
 import {
   loadMappings,
   loadReport,
   loadState,
   restoreMapping,
+  saveNotebookSelection,
 } from "../sync/mapping";
 import { loadSetupRecord } from "../sync/setup-store";
+import { listNoteOptions, notebookNameMap, type NoteOption } from "../edgeever/notes";
 import type { SyncEngine, PreviewResult } from "../sync/engine";
 import { errMsg, escapeHtml, redact, truncate } from "../util";
 
@@ -27,11 +29,9 @@ const ACTION_LABEL: Record<SyncAction, string> = {
   conflict: "冲突",
   unsupported: "特殊笔记",
   incomplete: "内容不完整",
-  deleted: "删除/归档提示",
+  deleted: "删除提示",
   error: "失败",
 };
-
-type Tab = "overview" | "plan" | "report";
 
 export function openSyncPanel(ctx: PluginContext): Promise<unknown> {
   return ctx.ui.panels.open(PANEL_ID);
@@ -50,65 +50,45 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
 
       let disposed = false;
       let busy = false;
-      let tab: Tab = "overview";
       let query = "";
       let preview: PreviewResult | null = null;
       let report: SyncReport | null = null;
       let resolutions: Record<string, ConflictResolution> = {};
       let connectionText = "尚未测试";
       let notice = "";
+      let setupText = "";
       let progress = { done: 0, total: 0 };
-      let settings = loadSettings(ctx); // Promise，init 中 await
+      let settings = loadSettings(ctx);
       let settingsSnapshot = {
-        notebookId: "",
+        notebookIds: [] as string[],
         direction: "bidirectional",
         tokenConfigured: false,
-        customApiBase: false,
+        setupReady: false,
       };
       let notebooks: Array<{ id: string; name: string }> = [];
+      let noteOptions: NoteOption[] = [];
+      let singleNoteId = "";
       let mappingCount = 0;
       let deletedCount = 0;
-      let firstSyncDone = false;
       let lastSyncAt = "";
       let confirmChecked = false;
-      let setupText = "";
-      let setupDataSourceId = "";
+      const pickNoteMode = (state as Record<string, unknown> | undefined)?.pickNote === true;
 
       shell.set({
         header: {
-          title: "Notion 双向同步",
-          description: "先预览、后执行；冲突默认不覆盖任一端。",
+          title: "Notion 同步",
+          description: "选好范围 → 生成预览 → 确认执行",
           actions: [
-            { id: "test", label: "测试连接" },
             { id: "preview", label: "生成预览" },
             { id: "apply", label: "执行同步" },
-            { id: "setup", label: "一键生成同步数据库" },
           ],
         },
-        toolbar: [
-          {
-            type: "tabs",
-            key: "tab",
-            value: "overview",
-            options: [
-              { value: "overview", label: "概览" },
-              { value: "plan", label: "同步计划" },
-              { value: "report", label: "上次结果" },
-            ],
-          },
-          { type: "search", key: "q", placeholder: "筛选笔记标题" },
-        ],
+        toolbar: [{ type: "search", key: "q", placeholder: "筛选同步计划" }],
         onAction(actionId: string) {
-          if (actionId === "test") void runTest();
           if (actionId === "preview") void runPreview();
           if (actionId === "apply") void runApply();
-          if (actionId === "setup") void runSetup();
         },
         onChange(key: string, value: unknown) {
-          if (key === "tab") {
-            tab = (value === "plan" || value === "report" ? value : "overview") as Tab;
-            render();
-          }
           if (key === "q") {
             query = String(value ?? "").toLowerCase();
             render();
@@ -120,23 +100,24 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
         const s = await loadSettings(ctx);
         settings = Promise.resolve(s);
         settingsSnapshot = {
-          notebookId: s.notebookId,
+          notebookIds: s.notebookIds,
           direction: s.direction,
           tokenConfigured: Boolean(s.token),
-          customApiBase: isCustomApiBase(s),
+          setupReady: Boolean(s.dataSourceId),
         };
         const st = await loadState(ctx);
-        firstSyncDone = st.firstSyncDone;
         lastSyncAt = st.lastSyncAt ?? "";
         const mappings = await loadMappings(ctx);
         mappingCount = Object.keys(mappings).length;
         deletedCount = Object.values(mappings).filter((m) => m?.status === "deleted").length;
         report = (await loadReport(ctx)) ?? null;
-        const setupRecord = await loadSetupRecord(ctx);
-        setupDataSourceId = setupRecord?.dataSourceId ?? "";
-        notebooks = (await ctx.notebooks.list())
+        const list = await ctx.notebooks.list();
+        const names = notebookNameMap(list);
+        notebooks = list
           .filter((n) => n && typeof n.id === "string")
-          .map((n) => ({ id: n.id, name: String(n.name ?? n.title ?? n.id) }));
+          .map((n) => ({ id: n.id, name: names.get(n.id) ?? n.id }));
+        noteOptions = await listNoteOptions(ctx, s.notebookIds);
+        if (singleNoteId && !noteOptions.some((o) => o.id === singleNoteId)) singleNoteId = "";
         render();
       }
 
@@ -144,46 +125,54 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
         if (disposed) return;
         const s = settingsSnapshot;
         const counts = preview?.counts;
-        // 预览警告 + 上次同步报告警告统一展示，避免附件/属性错误被藏在别的 Tab 里
         const warningList = [...new Set([...(preview?.warnings ?? []), ...(report?.warnings ?? [])])];
+        const selected = new Set(s.notebookIds);
+        const scopeLabel = selected.size ? `已选 ${selected.size} 个笔记本` : "全部笔记本";
+
         root.innerHTML = `
           <div class="ens-status ${busy ? "ens-busy" : ""}">
-            <div class="ens-row"><strong>连接状态</strong><span>${escapeHtml(connectionText)}</span></div>
-            <div class="ens-row"><strong>Token</strong><span>${s.tokenConfigured ? "已配置（加密存储，不回显）" : "未配置"}</span></div>
-            <div class="ens-row"><strong>同步数据库</strong><span>${setupDataSourceId ? `已生成 · Data Source ${escapeHtml(setupDataSourceId.slice(0, 8))}…` : "尚未生成（点击「一键生成同步数据库」）"}</span></div>
-            <div class="ens-row"><strong>API 地址</strong><span>${s.customApiBase ? "自建代理（Token 将发往该地址）" : "官方 api.notion.com"}</span></div>
-            <div class="ens-row"><strong>已建立映射</strong><span>${mappingCount} 条${deletedCount ? `，其中 ${deletedCount} 条标记为删除` : ""}</span></div>
-            <div class="ens-row"><strong>上次同步</strong><span>${escapeHtml(lastSyncAt || "尚未同步")}</span></div>
+            <span>Token ${s.tokenConfigured ? "已配置" : "未配置"}</span>
+            <span>同步数据库 ${s.setupReady ? "已生成" : "未生成"}</span>
+            <span>范围 ${escapeHtml(scopeLabel)}</span>
+            <span>上次同步 ${escapeHtml(lastSyncAt || "尚未同步")}</span>
+            <span>映射 ${mappingCount} 条</span>
           </div>
 
-          <div class="ens-controls">
-            <label>同步笔记本
-              <select data-control="notebook">
-                <option value="">（未选择）</option>
-                ${notebooks.map((n) => `<option value="${escapeHtml(n.id)}" ${n.id === s.notebookId ? "selected" : ""}>${escapeHtml(n.name)}</option>`).join("")}
-              </select>
-            </label>
-            <label>同步方向
+          <div class="ens-section">
+            <div class="ens-label">同步范围 <small>不勾选 = 全部笔记本；可勾选单个或多个</small></div>
+            <div class="ens-checks">
+              ${notebooks.length
+                ? notebooks.map((n) => `<label><input type="checkbox" data-control="notebook" data-id="${escapeHtml(n.id)}" ${selected.has(n.id) ? "checked" : ""}/>${escapeHtml(n.name)}</label>`).join("")
+                : `<span class="ens-empty">没有可用笔记本</span>`}
+              ${selected.size ? `<button data-action="clear-notebooks">清空选择</button>` : ""}
+            </div>
+          </div>
+
+          <div class="ens-inline">
+            <label>方向
               <select data-control="direction">
-                <option value="bidirectional" ${s.direction === "bidirectional" ? "selected" : ""}>双向（冲突需人工处理）</option>
+                <option value="bidirectional" ${s.direction === "bidirectional" ? "selected" : ""}>双向</option>
                 <option value="push" ${s.direction === "push" ? "selected" : ""}>仅推送到 Notion</option>
                 <option value="pull" ${s.direction === "pull" ? "selected" : ""}>仅拉取到 EdgeEver</option>
               </select>
             </label>
+            <label>单篇笔记
+              <select data-control="single-note">
+                <option value="">选择笔记…</option>
+                ${noteOptions.map((o) => `<option value="${escapeHtml(o.id)}" ${o.id === singleNoteId ? "selected" : ""}>${escapeHtml(o.title)}${o.notebookName ? ` · ${escapeHtml(o.notebookName)}` : ""}</option>`).join("")}
+              </select>
+            </label>
+            <button data-action="sync-one" ${!singleNoteId || busy ? "disabled" : ""}>同步此篇</button>
           </div>
+          ${pickNoteMode ? `<div class="ens-hint">宿主未提供「当前笔记」上下文，请在这里选择要同步的那一篇笔记。</div>` : ""}
 
           <div class="ens-actions">
-            <button data-action="setup">一键生成同步数据库</button>
-            <button data-action="test">测试连接</button>
             <button data-action="preview">生成预览</button>
             <button data-action="apply" ${!preview || busy ? "disabled" : ""}>执行同步（${preview?.plan.length ?? 0} 项）</button>
-            <button data-action="restore">恢复删除映射（${deletedCount}）</button>
-            <button data-action="retry" ${!report || busy ? "disabled" : ""}>重试失败项</button>
           </div>
-
           <label class="ens-confirm">
             <input type="checkbox" data-control="confirm" ${confirmChecked ? "checked" : ""}/>
-            我已阅读下方同步计划，确认执行上述写入（首次全量同步不会自动开始）
+            我已阅读下方同步计划，确认执行写入
           </label>
 
           ${notice ? `<div class="ens-notice">${escapeHtml(notice)}</div>` : ""}
@@ -199,31 +188,36 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
               <span>删除提示 ${counts.deleted}</span><span>失败 ${counts.failed}</span>
             </div>` : ""}
 
-          ${warningList.length ? `<div class="ens-warnings"><strong>提示与警告</strong><ul>${warningList.map((w) => `<li>${escapeHtml(truncate(w, 400))}</li>`).join("")}</ul></div>` : ""}
+          ${warningList.length ? `<div class="ens-warnings"><strong>提示</strong><ul>${warningList.map((w) => `<li>${escapeHtml(truncate(w, 400))}</li>`).join("")}</ul></div>` : ""}
 
-          <div class="ens-list">
-            ${tab === "overview" ? overviewHtml() : tab === "plan" ? planHtml() : reportHtml()}
-          </div>
+          <div class="ens-list">${planHtml()}</div>
+
+          <details class="ens-advanced">
+            <summary>高级选项与说明</summary>
+            <div class="ens-actions">
+              <button data-action="setup">一键生成同步数据库</button>
+              <button data-action="test">测试连接</button>
+              <button data-action="restore">恢复删除映射（${deletedCount}）</button>
+              <button data-action="retry" ${!report || busy ? "disabled" : ""}>重试失败项</button>
+            </div>
+            <p class="ens-report-meta">连接：${escapeHtml(connectionText)}</p>
+            ${reportHtml()}
+            <ol class="ens-help">
+              <li>Notion 里建一个空页面，在该页面「··· → Connections」中加入 Integration；插件设置只填 Token 与父页面 ID。</li>
+              <li>点「一键生成同步数据库」自动建库并保存 Data Source ID，无需手写任何 ID。</li>
+              <li>默认只展示标题、标签、笔记本、时间与同步时间；Hash 等技术值只保存在本地。</li>
+              <li>冲突默认不覆盖任一端；删除只标记映射，不永久删除任一端数据。</li>
+            </ol>
+          </details>
         `;
       }
 
-      function overviewHtml(): string {
-        return `
-          <h3>使用说明</h3>
-          <ol>
-            <li>在 Notion 新建一个空页面，在该页面「··· → Connections」中添加 Integration；Token 需具备 Read / Update / Insert content 能力。</li>
-            <li>插件设置里填写 Token 与「Notion 父页面 ID」（可粘贴页面链接），点击本面板的「一键生成同步数据库」：插件自动建库、建好全部属性并保存 Data Source ID，无需手动复制任何 ID。</li>
-            <li>已有数据库也可在设置里直接填 Data Source ID / 数据库 ID；此时一键生成只检查并补齐缺失属性，不会重复建库。</li>
-            <li>选择笔记本 → 测试连接 → 生成预览 → 勾选确认 → 执行同步。</li>
-          </ol>
-          <p>一键生成不会删除或改类型任何已有属性；类型不匹配只会提示，需手动在 Notion 中调整。特殊笔记与不完整的 Notion Markdown 一律跳过，不会被普通 Markdown 覆盖。</p>
-          <p>特殊笔记（思维导图、表格、海报、信息图等）与不完整的 Notion Markdown 一律跳过并提示，不会被普通 Markdown 覆盖。</p>
-          <p>删除采用软删除策略：只标记映射并提示，不自动永久删除任一端数据。</p>
-        `;
+      function filtered(items: SyncPlanItem[]): SyncPlanItem[] {
+        return items.filter((i) => !query || i.title.toLowerCase().includes(query));
       }
 
       function planHtml(): string {
-        if (!preview) return `<p class="ens-empty">尚未生成预览。点击「生成预览」查看将要发生的操作。</p>`;
+        if (!preview) return `<p class="ens-empty">点击「生成预览」查看将要发生的操作（此阶段只读）。</p>`;
         const items = filtered(preview.plan);
         if (!items.length) return `<p class="ens-empty">没有符合条件的计划项。</p>`;
         return items
@@ -251,19 +245,15 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
 
       function reportHtml(): string {
         if (!report) return `<p class="ens-empty">尚无同步报告。</p>`;
-        const items = (report.items ?? []).filter((i) => !query || i.title.toLowerCase().includes(query));
+        const items = report.items ?? [];
         return `
           <div class="ens-report-meta">开始 ${escapeHtml(report.startedAt)} · 结束 ${escapeHtml(report.finishedAt)} · 方向 ${escapeHtml(report.direction)}</div>
           ${items.length ? items.map((i) => `
             <div class="ens-item ens-${escapeHtml(i.action)}">
               <div class="ens-item-head"><span class="ens-badge">${escapeHtml(ACTION_LABEL[i.action] ?? i.action)}</span><strong>${escapeHtml(i.title)}</strong></div>
               <div class="ens-reason">${escapeHtml(truncate(i.message, 600))}</div>
-            </div>`).join("") : `<p class="ens-empty">没有匹配的记录。</p>`}
+            </div>`).join("") : `<p class="ens-empty">没有记录。</p>`}
         `;
-      }
-
-      function filtered(items: SyncPlanItem[]): SyncPlanItem[] {
-        return items.filter((i) => !query || i.title.toLowerCase().includes(query));
       }
 
       function setBusy(value: boolean, message = ""): void {
@@ -276,6 +266,11 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
         return settings;
       }
 
+      async function showError(e: unknown): Promise<void> {
+        const s = await currentSettings();
+        setBusy(false, redact(errMsg(e), s.token));
+      }
+
       async function runSetup(): Promise<void> {
         if (busy) return;
         setBusy(true, "正在生成/检查同步数据库…");
@@ -283,17 +278,11 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
           const result = await engine.setupDatabase();
           setupText = result.message;
           await refreshMeta();
-          setBusy(
-            false,
-            result.created
-              ? `同步数据库已生成，Data Source ID 已自动保存（${result.record.dataSourceId.slice(0, 8)}…），现在可以测试连接。`
-              : "同步数据库检查完成，未重复建库。",
-          );
+          setBusy(false, result.created ? "同步数据库已生成，Data Source ID 已自动保存。" : "同步数据库检查完成，未重复建库。");
           ctx.ui.showNotice(result.created ? "Notion 同步数据库已生成" : "Notion 同步数据库检查完成");
         } catch (e) {
-          const s = await currentSettings();
           setupText = "";
-          setBusy(false, redact(errMsg(e), s.token));
+          await showError(e);
         }
       }
 
@@ -302,13 +291,12 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
         setBusy(true, "正在验证 Token 与 Data Source 访问权限…");
         try {
           const info = await engine.testConnection();
-          connectionText = `已连接：${info.workspaceName || info.botName || "Notion 工作区"} · Data Source ${info.dataSourceId.slice(0, 8)}…`;
-          setBusy(false, "连接验证通过。Token 有效且 Integration 已获授权访问目标 Data Source。");
+          connectionText = `已连接：${info.workspaceName || info.botName || "Notion 工作区"}`;
+          setBusy(false, "连接验证通过。");
           ctx.ui.showNotice("Notion 连接验证通过");
         } catch (e) {
           connectionText = "连接失败";
-          const s = await currentSettings();
-          setBusy(false, redact(errMsg(e), s.token));
+          await showError(e);
         }
       }
 
@@ -320,10 +308,9 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
           resolutions = {};
           confirmChecked = false;
           await refreshMeta();
-          setBusy(false, `预览完成：共 ${preview.plan.length} 项。请查看「同步计划」后再执行。`);
+          setBusy(false, `预览完成：共 ${preview.plan.length} 项，请确认后执行。`);
         } catch (e) {
-          const s = await currentSettings();
-          setBusy(false, redact(errMsg(e), s.token));
+          await showError(e);
         }
       }
 
@@ -355,10 +342,28 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
           confirmChecked = false;
           render();
         } catch (e) {
-          const s = await currentSettings();
-          setBusy(false, redact(errMsg(e), s.token));
+          await showError(e);
         } finally {
           progress = { done: 0, total: 0 };
+        }
+      }
+
+      async function runSyncOne(): Promise<void> {
+        if (busy || !singleNoteId) {
+          notice = "请先选择要同步的笔记。";
+          render();
+          return;
+        }
+        setBusy(true, "正在同步单篇笔记…");
+        try {
+          const result = await engine.syncOneNote(singleNoteId);
+          report = result.report;
+          notice = result.message;
+          ctx.ui.showNotice(result.message);
+          await refreshMeta();
+          setBusy(false, result.message);
+        } catch (e) {
+          await showError(e);
         }
       }
 
@@ -368,17 +373,13 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
           const mappings = await loadMappings(ctx);
           let n = 0;
           for (const [id, m] of Object.entries(mappings)) {
-            if (m?.status === "deleted") {
-              if (await restoreMapping(ctx, id)) n++;
-            }
+            if (m?.status === "deleted" && (await restoreMapping(ctx, id))) n++;
           }
           await refreshMeta();
           notice = `已恢复 ${n} 条映射，请重新生成预览。`;
           render();
         } catch (e) {
-          const s = await currentSettings();
-          notice = redact(errMsg(e), s.token);
-          render();
+          await showError(e);
         }
       }
 
@@ -406,8 +407,7 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
           setBusy(false, `重试完成：失败 ${report.counts.failed} 项。`);
           await refreshMeta();
         } catch (e) {
-          const s = await currentSettings();
-          setBusy(false, redact(errMsg(e), s.token));
+          await showError(e);
         }
       }
 
@@ -420,8 +420,10 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
         else if (action === "setup") void runSetup();
         else if (action === "preview") void runPreview();
         else if (action === "apply") void runApply();
+        else if (action === "sync-one") void runSyncOne();
         else if (action === "restore") void runRestore();
         else if (action === "retry") void runRetry();
+        else if (action === "clear-notebooks") void clearNotebooks();
         else if (action === "resolve") {
           const key = target.dataset.key;
           const value = target.dataset.value as ConflictResolution | undefined;
@@ -430,6 +432,15 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
             render();
           }
         }
+      }
+
+      async function clearNotebooks(): Promise<void> {
+        await saveNotebookSelection(ctx, []);
+        settingsSnapshot = { ...settingsSnapshot, notebookIds: [] };
+        preview = null;
+        notice = "已清空笔记本选择，将同步全部笔记本。";
+        await refreshMeta();
+        render();
       }
 
       function onChange(event: Event): void {
@@ -441,24 +452,39 @@ export function registerPanel(ctx: PluginContext, engine: SyncEngine): () => voi
           render();
           return;
         }
-        const key = control === "notebook" ? "sync-notebook-id" : "sync-direction";
-        const value = (target as HTMLSelectElement).value;
-        void (async () => {
-          try {
-            await ctx.settings.set(key, value);
-            settingsSnapshot =
-              control === "notebook"
-                ? { ...settingsSnapshot, notebookId: value }
-                : { ...settingsSnapshot, direction: value };
-            preview = null;
-            notice = "配置已更新，请重新生成预览。";
-            render();
-          } catch (e) {
-            const s = await currentSettings();
-            notice = `保存配置失败，请在插件设置中手动修改：${redact(errMsg(e), s.token)}`;
-            render();
-          }
-        })();
+        if (control === "single-note") {
+          singleNoteId = (target as HTMLSelectElement).value;
+          render();
+          return;
+        }
+        if (control === "notebook") {
+          const id = target?.dataset?.id ?? "";
+          const checked = (target as HTMLInputElement).checked;
+          const next = new Set(settingsSnapshot.notebookIds);
+          if (checked) next.add(id);
+          else next.delete(id);
+          const ids = Array.from(next).filter(Boolean);
+          settingsSnapshot = { ...settingsSnapshot, notebookIds: ids };
+          preview = null;
+          notice = ids.length ? `已选择 ${ids.length} 个笔记本，请重新生成预览。` : "未勾选任何笔记本，将同步全部笔记本。";
+          void saveNotebookSelection(ctx, ids).then(() => refreshMeta());
+          render();
+          return;
+        }
+        if (control === "direction") {
+          const value = (target as HTMLSelectElement).value;
+          void (async () => {
+            try {
+              await ctx.settings.set("sync-direction", value);
+              settingsSnapshot = { ...settingsSnapshot, direction: value };
+              preview = null;
+              notice = "同步方向已更新，请重新生成预览。";
+              render();
+            } catch (e) {
+              await showError(e);
+            }
+          })();
+        }
       }
 
       root.addEventListener("click", onClick);

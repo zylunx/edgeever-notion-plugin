@@ -7,6 +7,8 @@ export const STORAGE_KEYS = {
   state: "notion-sync:state",
   pending: "notion-sync:pending",
   setup: "notion-sync:setup",
+  /** 面板里选中的笔记本（单个或多个）；空数组 = 同步全部笔记本。不暴露在设置界面。 */
+  notebooks: "notion-sync:notebooks",
 } as const;
 
 export interface SyncState {
@@ -96,4 +98,14 @@ export async function loadPending(ctx: PluginContext): Promise<string[]> {
 
 export async function clearPending(ctx: PluginContext): Promise<void> {
   await ctx.storage.set(STORAGE_KEYS.pending, []);
+}
+
+/** 笔记本多选：存 context.storage，不占用设置界面。空数组表示「全部笔记本」。 */
+export async function loadNotebookSelection(ctx: PluginContext): Promise<string[]> {
+  const raw = await ctx.storage.get(STORAGE_KEYS.notebooks);
+  return Array.isArray(raw) ? raw.map(String).filter(Boolean) : [];
+}
+
+export async function saveNotebookSelection(ctx: PluginContext, ids: string[]): Promise<void> {
+  await ctx.storage.set(STORAGE_KEYS.notebooks, Array.from(new Set(ids)).filter(Boolean));
 }

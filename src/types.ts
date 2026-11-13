@@ -5,7 +5,6 @@
  * 可确认的调用形式与返回结构定义；未展开的部分用宽松类型 + 运行时防御处理。
  * Notion 侧类型按 2026-03-11 版官方 API 参考定义，响应解析一律忽略未知字段。
  */
-
 // ---------------------------------------------------------------- EdgeEver
 
 export interface PluginNoteSummary {
@@ -83,6 +82,10 @@ export interface PluginContext {
   resources: {
     list(noteId: string): Promise<PluginResource[]>;
     read(resourceId: string): Promise<Blob | ArrayBuffer | Uint8Array | { data: ArrayBuffer | Uint8Array }>;
+  };
+  /** 官方 commands.register 的 run() 不接收参数；当前笔记通过文档化的 getDocument() 做防御性探测。 */
+  editor?: {
+    getDocument(): Promise<unknown>;
   };
   settings: {
     get<T = unknown>(key: string): Promise<T | undefined>;
@@ -192,12 +195,12 @@ export interface NotionFileUpload {
 
 // ------------------------------------------------------------- plugin state
 
-/** 文档 §5.2 的映射结构；额外保留两条基线 Hash，避免 Notion 回读改写造成误判。 */
+/** 映射结构；额外保留两条基线 Hash，避免 Notion 回读改写造成误判。 */
 export interface NoteMapping {
   edgeeverNoteId: string;
   notionPageId: string;
   edgeeverNotebookId?: string;
-  /** 上次成功同步的基线（规范化正文 Hash），兼容文档 §9.3 的 B。 */
+  /** 上次成功同步的基线（规范化正文 Hash）。 */
   lastSyncedHash: string;
   lastSyncedAt: string;
   /** 上次成功同步时 EdgeEver 侧规范化正文 Hash。 */
@@ -222,30 +225,37 @@ export interface ResourceMapping {
   error?: string;
 }
 
+/**
+ * Notion 属性名固定，不暴露给用户配置。
+ * 只保留用户可见列 + 幂等必需的 EdgeEver ID；Hash 等技术值只存本地 storage。
+ * Notion 公开 API 不提供视图列可见性配置，因此「隐藏」通过不创建这些列实现。
+ */
 export interface PropertyNames {
   name: string;
-  edgeeverId: string;
-  notebookId: string;
   tags: string;
-  contentHash: string;
-  lastSynced: string;
-  syncStatus: string;
+  /** 笔记本名称（select），便于在 Notion 里按笔记本筛选。 */
+  notebook: string;
   edgeeverUpdated: string;
+  lastSynced: string;
+  /** 内部幂等键：storage 丢失时用于反查页面，避免重复创建。 */
+  edgeeverId: string;
 }
 
 export interface PluginSettings {
   /** 仅从 context.secrets / secret 类型设置读取，绝不进入 storage 或日志。 */
   token: string;
-  databaseId: string;
+  /** 一键建库后自动保存在 context.storage，用户无需配置。 */
   dataSourceId: string;
-  /** 区分手写配置与一键生成后自动保存的配置。 */
-  dataSourceIdSource: "manual" | "generated" | "none";
+  dataSourceIdSource: "generated" | "none";
+  databaseId: string;
   /** 一键建库用的 Notion 父页面 ID（可粘贴页面链接）。 */
   parentPageId: string;
+  /** 内部固定，不再暴露为设置项。 */
   apiBaseUrl: string;
   notionVersion: string;
   markdownVersion: "v1" | "v2";
-  notebookId: string;
+  /** 面板里选择的笔记本（单个或多个）；空数组表示全部笔记本。存在 context.storage。 */
+  notebookIds: string[];
   direction: "bidirectional" | "push" | "pull";
   props: PropertyNames;
   autoSync: boolean;
@@ -279,6 +289,9 @@ export interface SyncPlanItem {
   notionHash?: string;
   baselineHash?: string;
   resolution?: ConflictResolution;
+  /** 笔记所属笔记本 ID 与名称，用于写入 Notion 的 Notebook 属性。 */
+  notebookId?: string;
+  notebookName?: string;
   /** apply 阶段需要的内部数据（不写入 storage，不展示给用户）。 */
   note?: PluginNote;
   page?: NotionPage;

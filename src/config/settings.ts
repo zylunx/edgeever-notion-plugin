@@ -1,7 +1,12 @@
 import type { PluginContext, PluginSettings, PropertyNames } from "../types";
-import { asBool, asNumber, asString } from "../util";
+import { asBool, asString } from "../util";
+import { loadNotebookSelection } from "../sync/mapping";
 import { loadSetupRecord } from "../sync/setup-store";
 
+/**
+ * 内部固定值：不再暴露在插件设置界面（用户无需理解 Data Source / API 版本 / Markdown 版本 / 属性名）。
+ * Data Source ID 由「一键生成同步数据库」自动写入 context.storage 并从这里读取。
+ */
 export const SETTINGS_DEFAULTS = {
   apiBaseUrl: "https://api.notion.com",
   notionVersion: "2026-03-11",
@@ -13,15 +18,20 @@ export const SETTINGS_DEFAULTS = {
   maxAttachmentMB: 5,
 } as const;
 
-export const DEFAULT_PROPS: PropertyNames = {
+/**
+ * Notion 属性名固定，且只包含「用户可见列 + 幂等必需的内部键」。
+ * Content Hash / Sync Status / EdgeEver Notebook ID 等技术列不再创建：
+ * 双基线 Hash 与同步状态本来就在本地 context.storage 的映射表里。
+ * 官方 OpenAPI 的 initialDataSourceRequest 只有 properties，没有视图列可见性字段，
+ * 因此「隐藏」通过不创建这些列实现，而不是假装 API 能设置 visible。
+ */
+export const FIXED_PROPS: PropertyNames = {
   name: "Name",
-  edgeeverId: "EdgeEver ID",
-  notebookId: "EdgeEver Notebook ID",
   tags: "Tags",
-  contentHash: "Content Hash",
-  lastSynced: "Last Synced",
-  syncStatus: "Sync Status",
+  notebook: "Notebook",
   edgeeverUpdated: "EdgeEver Updated At",
+  lastSynced: "Last Synced",
+  edgeeverId: "EdgeEver ID",
 };
 
 /**
@@ -47,59 +57,34 @@ export async function loadSettings(ctx: PluginContext): Promise<PluginSettings> 
   }
   if (!token) token = asString(await get("notion-token"), "").trim();
 
-  const mdRaw = asString(await get("markdown-version"), SETTINGS_DEFAULTS.markdownVersion);
+  // 一键生成的数据库信息只存在 context.storage，不占设置界面、也不需要用户复制 ID。
+  const generated = await loadSetupRecord(ctx);
   const dirRaw = asString(await get("sync-direction"), SETTINGS_DEFAULTS.direction);
-  const manualDataSourceId = asString(await get("notion-data-source-id"), "").trim();
-  const manualDatabaseId = asString(await get("notion-database-id"), "").trim();
-  // 一键生成的 Data Source ID 只保存在插件 storage：手写配置始终优先，避免旧记录覆盖用户新填的库。
-  const generated = !manualDataSourceId && !manualDatabaseId ? await loadSetupRecord(ctx) : undefined;
-
-  const props: PropertyNames = {
-    name: asString(await get("prop-name"), DEFAULT_PROPS.name).trim() || DEFAULT_PROPS.name,
-    edgeeverId: asString(await get("prop-edgeever-id"), DEFAULT_PROPS.edgeeverId).trim() || DEFAULT_PROPS.edgeeverId,
-    notebookId: asString(await get("prop-notebook-id"), DEFAULT_PROPS.notebookId).trim(),
-    tags: asString(await get("prop-tags"), DEFAULT_PROPS.tags).trim(),
-    contentHash: asString(await get("prop-content-hash"), DEFAULT_PROPS.contentHash).trim(),
-    lastSynced: asString(await get("prop-last-synced"), DEFAULT_PROPS.lastSynced).trim(),
-    syncStatus: asString(await get("prop-sync-status"), DEFAULT_PROPS.syncStatus).trim(),
-    edgeeverUpdated: asString(await get("prop-edgeever-updated"), DEFAULT_PROPS.edgeeverUpdated).trim(),
-  };
 
   return {
     token,
-    databaseId: manualDatabaseId,
-    dataSourceId: manualDataSourceId || generated?.dataSourceId || "",
-    dataSourceIdSource: manualDataSourceId || manualDatabaseId ? "manual" : generated ? "generated" : "none",
+    dataSourceId: generated?.dataSourceId ?? "",
+    dataSourceIdSource: generated ? "generated" : "none",
+    databaseId: generated?.databaseId ?? "",
     parentPageId: asString(await get("notion-parent-page-id"), "").trim(),
-    apiBaseUrl:
-      asString(await get("api-base-url"), SETTINGS_DEFAULTS.apiBaseUrl).trim().replace(/\/+$/, "") ||
-      SETTINGS_DEFAULTS.apiBaseUrl,
-    notionVersion:
-      asString(await get("notion-version"), SETTINGS_DEFAULTS.notionVersion).trim() || SETTINGS_DEFAULTS.notionVersion,
-    markdownVersion: mdRaw === "v1" ? "v1" : "v2",
-    notebookId: asString(await get("sync-notebook-id"), "").trim(),
+    apiBaseUrl: SETTINGS_DEFAULTS.apiBaseUrl,
+    notionVersion: SETTINGS_DEFAULTS.notionVersion,
+    markdownVersion: SETTINGS_DEFAULTS.markdownVersion,
+    notebookIds: await loadNotebookSelection(ctx),
     direction: dirRaw === "push" || dirRaw === "pull" ? dirRaw : "bidirectional",
-    props,
+    props: FIXED_PROPS,
     autoSync: asBool(await get("auto-sync"), SETTINGS_DEFAULTS.autoSync),
-    autoSyncDelaySec: Math.max(5, asNumber(await get("auto-sync-delay-sec"), SETTINGS_DEFAULTS.autoSyncDelaySec)),
+    autoSyncDelaySec: SETTINGS_DEFAULTS.autoSyncDelaySec,
     uploadAttachments: asBool(await get("upload-attachments"), SETTINGS_DEFAULTS.uploadAttachments),
-    maxAttachmentMB: Math.max(0.1, asNumber(await get("max-attachment-mb"), SETTINGS_DEFAULTS.maxAttachmentMB)),
+    maxAttachmentMB: SETTINGS_DEFAULTS.maxAttachmentMB,
   };
 }
 
-/** 返回可读的配置错误；null 表示可以继续。 */
+/** 返回可读的配置错误；null 表示可以继续。未选择笔记本时默认同步全部笔记本。 */
 export function validateSettings(s: PluginSettings): string | null {
   if (!s.token) return "请先在插件设置中填写 Notion Integration Token（secret 字段）";
-  if (!s.dataSourceId && !s.databaseId) {
-    return "请先点击同步面板的「一键生成同步数据库」（需先在设置中填写 Notion 父页面 ID），或手动填写 Data Source ID / 数据库 ID";
+  if (!s.dataSourceId) {
+    return "请先点击「一键生成同步数据库」（需先在设置中填写 Notion 父页面 ID）；Data Source ID 会由插件自动保存，无需手动填写";
   }
-  if (!/^https:\/\//i.test(s.apiBaseUrl) && !/^http:\/\/localhost/i.test(s.apiBaseUrl)) {
-    return "API 基础地址必须使用 https（本地调试可用 http://localhost）";
-  }
-  if (!s.notebookId) return "请先在同步面板中选择要同步的 EdgeEver 笔记本";
   return null;
-}
-
-export function isCustomApiBase(s: PluginSettings): boolean {
-  return s.apiBaseUrl.replace(/\/+$/, "") !== SETTINGS_DEFAULTS.apiBaseUrl;
 }

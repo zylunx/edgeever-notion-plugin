@@ -12,11 +12,10 @@ function richText(content: string): Array<{ text: { content: string } }> {
 export interface PropertyInput {
   title?: string;
   edgeeverId?: string;
-  notebookId?: string;
+  /** 笔记本名称，写入 Notebook（select）便于在 Notion 里按笔记本筛选。 */
+  notebookName?: string;
   tags?: string[];
-  contentHash?: string;
   lastSynced?: string;
-  syncStatus?: string;
   edgeeverUpdated?: string;
 }
 
@@ -25,13 +24,12 @@ function propMap(s: PluginSettings, input: PropertyInput): Record<string, unknow
   const out: Record<string, unknown> = {};
   if (input.title !== undefined && p.name) out[p.name] = { title: richText(input.title) };
   if (input.edgeeverId !== undefined && p.edgeeverId) out[p.edgeeverId] = { rich_text: richText(input.edgeeverId) };
-  if (input.notebookId !== undefined && p.notebookId) out[p.notebookId] = { rich_text: richText(input.notebookId) };
-  if (input.contentHash !== undefined && p.contentHash) out[p.contentHash] = { rich_text: richText(input.contentHash) };
+  // select 写入不存在的 option 时 Notion 会自动创建；名称按官方上限截断。
+  if (input.notebookName && p.notebook) {
+    out[p.notebook] = { select: { name: input.notebookName.slice(0, 100) } };
+  }
   if (input.tags !== undefined && p.tags) {
     out[p.tags] = { multi_select: input.tags.slice(0, 100).map((name) => ({ name })) };
-  }
-  if (input.syncStatus !== undefined && p.syncStatus) {
-    out[p.syncStatus] = { select: { name: input.syncStatus } };
   }
   if (input.lastSynced !== undefined && p.lastSynced) out[p.lastSynced] = { date: { start: input.lastSynced } };
   if (input.edgeeverUpdated !== undefined && p.edgeeverUpdated) {
@@ -100,7 +98,7 @@ export function readTitle(page: NotionPage, propertyName: string): string {
   const props = page.properties ?? {};
   const named = props[propertyName];
   if (named) return plainText(named);
-  // 兼容属性名被用户改过的情况：取第一个 title 类型属性
+  // 兼容属性名被改过的情况：取第一个 title 类型属性
   for (const value of Object.values(props)) {
     if (value?.type === "title") return plainText(value);
   }
@@ -110,6 +108,10 @@ export function readTitle(page: NotionPage, propertyName: string): string {
 export function readTags(prop: NotionPropertyValue | undefined): string[] {
   if (!prop?.multi_select) return [];
   return prop.multi_select.map((o) => o.name ?? "").filter(Boolean);
+}
+
+export function readNotebookName(prop: NotionPropertyValue | undefined): string {
+  return prop?.select?.name ?? "";
 }
 
 export function isRemoteDeleted(page: NotionPage): boolean {
