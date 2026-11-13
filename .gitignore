@@ -1,0 +1,10 @@
+# 依赖与构建缓存
+node_modules/
+*.log
+.DS_Store
+
+# 本地工具数据（非项目产物）
+.workbuddy/
+
+# 开发规范草案（仅本地参考，不纳入分发仓库）
+NOTION_API_REFERENCE.md

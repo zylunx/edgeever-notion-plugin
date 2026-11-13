@@ -1,0 +1,20 @@
+{
+  "name": "edgeever-notion-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "EdgeEver ↔ Notion 双向同步插件（普通文本笔记 / Markdown / 冲突保护）",
+  "scripts": {
+    "build": "node node_modules/esbuild/bin/esbuild src/main.ts --bundle --format=esm --target=es2022 --outfile=main.js",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json",
+    "test": "npm run build && node test/smoke.mjs",
+    "check": "npm run typecheck && npm run test"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "edgeever-notion-plugin": "file:"
+  }
+}

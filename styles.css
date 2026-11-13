@@ -1,0 +1,124 @@
+.ens-panel {
+  --ens-border: rgba(127, 127, 127, 0.28);
+  --ens-muted: #6b7280;
+  --ens-warn: #b45309;
+  --ens-ok: #15803d;
+  --ens-bad: #b91c1c;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 12px 4px 24px;
+  color: inherit;
+}
+
+.ens-panel h3 { margin: 14px 0 6px; font-size: 14px; }
+.ens-panel p { margin: 6px 0; }
+.ens-panel ol { margin: 6px 0; padding-left: 20px; }
+
+.ens-status,
+.ens-controls,
+.ens-actions,
+.ens-confirm,
+.ens-summary,
+.ens-warnings,
+.ens-notice,
+.ens-progress,
+.ens-report-meta {
+  margin: 8px 0;
+}
+
+.ens-status {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 4px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--ens-border);
+  border-radius: 8px;
+}
+.ens-status.ens-busy { opacity: 0.72; }
+.ens-status strong { font-weight: 600; color: var(--ens-muted); }
+
+.ens-controls { display: flex; flex-wrap: wrap; gap: 12px; }
+.ens-controls label { display: flex; align-items: center; gap: 6px; }
+.ens-controls select {
+  max-width: 260px;
+  padding: 4px 8px;
+  border: 1px solid var(--ens-border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+
+.ens-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.ens-actions button,
+.ens-conflict button {
+  padding: 5px 10px;
+  border: 1px solid var(--ens-border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.ens-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+.ens-conflict button.ens-active { border-color: var(--ens-ok); color: var(--ens-ok); font-weight: 600; }
+
+.ens-confirm { display: flex; align-items: center; gap: 8px; color: var(--ens-muted); }
+.ens-notice,
+.ens-progress {
+  padding: 8px 12px;
+  border: 1px solid var(--ens-border);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ens-summary { display: flex; flex-wrap: wrap; gap: 8px; }
+.ens-summary span {
+  padding: 2px 8px;
+  border: 1px solid var(--ens-border);
+  border-radius: 999px;
+}
+.ens-summary .ens-warn { color: var(--ens-warn); }
+
+.ens-warnings {
+  padding: 8px 12px;
+  border-left: 3px solid var(--ens-warn);
+  background: rgba(180, 83, 9, 0.08);
+  border-radius: 4px;
+}
+.ens-warnings ul { margin: 4px 0; padding-left: 18px; }
+
+.ens-list { margin-top: 12px; }
+.ens-empty { color: var(--ens-muted); font-style: italic; }
+.ens-report-meta { color: var(--ens-muted); }
+
+.ens-item {
+  padding: 8px 12px;
+  margin: 6px 0;
+  border: 1px solid var(--ens-border);
+  border-radius: 8px;
+}
+.ens-item-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ens-badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--ens-border);
+  font-size: 11px;
+  color: var(--ens-muted);
+}
+.ens-reason { margin-top: 4px; color: var(--ens-muted); word-break: break-word; }
+.ens-conflict { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.ens-conflict button { padding: 3px 8px; font-size: 12px; }
+.ens-item.ens-conflict { border-left: 3px solid var(--ens-warn); }
+.ens-item.ens-error { border-left: 3px solid var(--ens-bad); }
+.ens-item.ens-unsupported,
+.ens-item.ens-incomplete,
+.ens-item.ens-deleted { border-left: 3px solid var(--ens-muted); }
+
+@media (prefers-color-scheme: dark) {
+  .ens-panel {
+    --ens-muted: #9ca3af;
+    --ens-warn: #fbbf24;
+    --ens-ok: #4ade80;
+    --ens-bad: #f87171;
+  }
+}
