@@ -2,7 +2,7 @@
   "type": "plugin",
   "id": "com.zylunx.edgeever-notion",
   "name": "Notion Sync",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "apiVersion": "2",
   "settingsUi": "host",
   "description": "Bidirectional sync between EdgeEver text notes and a Notion data source.",

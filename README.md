@@ -4,7 +4,7 @@
 
 **在 EdgeEver 与 Notion 之间双向同步文本笔记** · 一键生成数据库 · 只读预览 · 双基线冲突保护
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/zylunx/edgeever-notion-plugin/releases)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/zylunx/edgeever-notion-plugin/releases)
 [![Release](https://img.shields.io/github/v/release/zylunx/edgeever-notion-plugin?color=brightgreen)](https://github.com/zylunx/edgeever-notion-plugin/releases)
 [![Notion API](https://img.shields.io/badge/Notion%20API-2026--03--11-191919?logo=notion&logoColor=white)](https://developers.notion.com/reference/versioning)
 [![Platform](https://img.shields.io/badge/platform-web%20%7C%20desktop-2ea44f)](#)
@@ -78,7 +78,7 @@ https://github.com/zylunx/edgeever-notion-plugin
 | `styles.css` | 同步面板样式（可选） |
 
 > [!TIP]
-> 分发规范要求 Release Tag 匹配 Manifest 版本（`0.1.0` 或 `v0.1.0`）。本仓库首个 Release 为 **`v0.1.0`**。
+> 分发规范要求 Release Tag 匹配 Manifest 版本（`0.2.0` 或 `v0.2.0`）。本仓库首个 Release 为 `v0.1.0`；当前 Manifest 版本 `0.2.0` 对应 Tag 应为 **`v0.2.0`**。
 
 ---
 
@@ -246,7 +246,7 @@ npm run check       # typecheck + test
 
 1. 同步更新 `manifest.json` 的 `version`；
 2. `npm run check` 全绿后提交 `main.js`；
-3. 推送 Tag（需匹配 Manifest 版本）：`git tag -a v0.1.0 -m "..." && git push origin v0.1.0`，Release 随即自动生成；也可在 Actions 页手动 `Run workflow`。
+3. 推送 Tag（需匹配 Manifest 版本）：`git tag -a v0.2.0 -m "..." && git push origin v0.2.0`，Release 随即自动生成；也可在 Actions 页手动 `Run workflow`。
 
 ---
 

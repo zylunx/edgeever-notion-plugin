@@ -1,6 +1,6 @@
 {
   "name": "edgeever-notion-plugin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "EdgeEver ↔ Notion 双向同步插件（普通文本笔记 / Markdown / 冲突保护）",

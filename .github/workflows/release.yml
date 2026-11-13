@@ -46,7 +46,7 @@ jobs:
             "- main.js — 单文件打包产物" \
             "- styles.css — 同步面板样式（可选）" \
             "" \
-            "Release Tag 需匹配 manifest.json 中的 version（0.1.0 或 v0.1.0）。" \
+            "Release Tag 需匹配 manifest.json 中的 version（${VERSION} 或 v${VERSION}）。" \
             "" \
             "### 快速开始" \
             "1. 创建 Notion Integration 并开启 Read / Update / Insert content。" \
