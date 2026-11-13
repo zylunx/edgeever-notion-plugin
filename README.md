@@ -225,9 +225,11 @@ npm run check       # typecheck + test
 
 ### 发布新版本
 
+仓库内置 [`.github/workflows/release.yml`](./.github/workflows/release.yml)：推送 `main` 或 `v*` Tag 时自动创建 / 刷新 Release，并上传 `manifest.json`、`main.js`、`styles.css` 三个资产（使用仓库内置 `GITHUB_TOKEN`，无需额外凭据）。
+
 1. 同步更新 `manifest.json` 的 `version`；
 2. `npm run check` 全绿后提交 `main.js`；
-3. 创建 Tag 与 Release（Tag 需匹配 Manifest 版本），上传 `manifest.json`、`main.js`、`styles.css`。
+3. 推送 Tag（需匹配 Manifest 版本）：`git tag -a v0.1.0 -m "..." && git push origin v0.1.0`，Release 随即自动生成；也可在 Actions 页手动 `Run workflow`。
 
 ---
 

@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version and tag
+        id: meta
+        run: |
+          VERSION=$(node -p "require('./manifest.json').version")
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="v${VERSION}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or refresh GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          printf '%s\n' \
+            "## EdgeEver <-> Notion Sync v${VERSION}" \
+            "" \
+            "### 安装" \
+            "在 EdgeEver 插件市场输入仓库地址安装，或下载本 Release 的以下资产并放在同一目录：" \
+            "" \
+            "- manifest.json — 插件清单（根目录）" \
+            "- main.js — 单文件打包产物" \
+            "- styles.css — 同步面板样式（可选）" \
+            "" \
+            "Release Tag 需匹配 manifest.json 中的 version（0.1.0 或 v0.1.0）。" \
+            "" \
+            "### 快速开始" \
+            "1. 创建 Notion Integration 并开启 Read / Update / Insert content。" \
+            "2. 建一个空页面，在该页面的 Connections 中加入 Integration。" \
+            "3. 插件设置填写 Token 与父页面 ID。" \
+            "4. 面板点击「一键生成同步数据库」→ 测试连接 → 生成预览 → 勾选确认 → 执行同步。" \
+            "" \
+            "完整说明见仓库 README。当前版本仅完成 Mock 联调，未接入真实 Notion 工作区。" \
+            > /tmp/release-notes.md
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refreshing assets."
+            gh release upload "$TAG" manifest.json main.js styles.css --clobber
+          else
+            echo "Creating release $TAG."
+            gh release create "$TAG" manifest.json main.js styles.css \
+              --title "EdgeEver <-> Notion Sync v${VERSION}" \
+              --notes-file /tmp/release-notes.md
+          fi
