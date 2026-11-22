@@ -27,8 +27,51 @@ jobs:
           else
             TAG="v${VERSION}"
           fi
+          PREV_TAG=$(git tag --sort=-v:refname | grep -vx "$TAG" | head -n 1 || true)
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=${PREV_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          PREV_TAG: ${{ steps.meta.outputs.prev_tag }}
+        run: |
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..HEAD"
+            COMPARE_URL="https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG}"
+          else
+            RANGE="HEAD"
+            COMPARE_URL="https://github.com/${GITHUB_REPOSITORY}/commits/${TAG}"
+          fi
+
+          {
+            echo "## EdgeEver <-> Notion Sync v${VERSION}"
+            echo ""
+            echo "在 EdgeEver 插件市场输入仓库地址安装，或下载本 Release 的 manifest.json、main.js、styles.css。"
+            echo ""
+            echo "### 更新内容"
+            echo ""
+            section() {
+              local title="$1"; shift
+              local log
+              log=$(git log $RANGE --pretty=format:"- %s (%h)" "$@" 2>/dev/null)
+              if [ -n "$log" ]; then
+                echo "#### ${title}"
+                echo ""
+                echo "$log"
+                echo ""
+              fi
+            }
+            section "✨ 新功能" --grep="^feat" -i
+            section "🐛 问题修复" --grep="^fix" -i
+            section "📝 文档" --grep="^docs" -i
+            section "🔧 其他变更" --grep="^feat" -i --grep="^fix" -i --grep="^docs" -i --invert-grep
+            echo "**完整更新日志**：${COMPARE_URL}"
+          } > /tmp/release-notes.md
+
+          cat /tmp/release-notes.md
 
       - name: Create or refresh GitHub Release
         env:
@@ -36,30 +79,10 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
           TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          printf '%s\n' \
-            "## EdgeEver <-> Notion Sync v${VERSION}" \
-            "" \
-            "### 安装" \
-            "在 EdgeEver 插件市场输入仓库地址安装，或下载本 Release 的以下资产并放在同一目录：" \
-            "" \
-            "- manifest.json — 插件清单（根目录）" \
-            "- main.js — 单文件打包产物" \
-            "- styles.css — 同步面板样式（可选）" \
-            "" \
-            "Release Tag 需匹配 manifest.json 中的 version（${VERSION} 或 v${VERSION}）。" \
-            "" \
-            "### 快速开始" \
-            "1. 创建 Notion Integration 并开启 Read / Update / Insert content。" \
-            "2. 建一个空页面，在该页面的 Connections 中加入 Integration。" \
-            "3. 插件设置填写 Token 与父页面 ID。" \
-            "4. 面板点击「一键生成同步数据库」→ 测试连接 → 生成预览 → 勾选确认 → 执行同步。" \
-            "" \
-            "完整说明见仓库 README。当前版本仅完成 Mock 联调，未接入真实 Notion 工作区。" \
-            > /tmp/release-notes.md
-
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; refreshing assets."
+            echo "Release $TAG already exists; refreshing assets and notes."
             gh release upload "$TAG" manifest.json main.js styles.css --clobber
+            gh release edit "$TAG" --notes-file /tmp/release-notes.md
           else
             echo "Creating release $TAG."
             gh release create "$TAG" manifest.json main.js styles.css \
