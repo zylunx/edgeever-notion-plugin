@@ -5,6 +5,7 @@
 **在 EdgeEver 与 Notion 之间双向同步文本笔记** · 一键生成数据库 · 只读预览 · 双基线冲突保护
 
 [![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/zylunx/edgeever-notion-plugin/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Release](https://img.shields.io/github/v/release/zylunx/edgeever-notion-plugin?color=brightgreen)](https://github.com/zylunx/edgeever-notion-plugin/releases)
 [![Notion API](https://img.shields.io/badge/Notion%20API-2026--03--11-191919?logo=notion&logoColor=white)](https://developers.notion.com/reference/versioning)
 [![Platform](https://img.shields.io/badge/platform-web%20%7C%20desktop-2ea44f)](#)
@@ -268,7 +269,7 @@ npm run check       # typecheck + test
 附件上传**默认关闭**：正文中会把 EdgeEver 本地资源引用改写为 `EE-ATTACH:<资源ID>|<文件名>` 可追溯占位并报告；开启后才上传到 Notion，并在页面末尾追加由 `EE-ATTACHMENTS-START/END` 包裹、由插件维护的附件区（该区不参与正文 Hash）。
 
 > [!IMPORTANT]
-> 本仓库**只做了 Mock 联调，未接入真实 Notion 工作区**。首次使用建议在一个测试页面上执行「一键生成」，确认库与属性符合预期后再用于正式笔记。
+> v0.2.0 已在真实 EdgeEver + Notion 工作区验证通过，一键建库、双向同步与冲突保护均已实测。首次使用仍建议先在测试页面执行「一键生成」，确认库与属性符合预期后再用于正式笔记。
 
 > [!NOTE]
 > Notion API 会持续演进。升级 `notion-version` 前请重新核对官方文档的 Data Source 查询、Markdown 更新与文件上传接口；`2026-03-11` 中 `markdown_version: v1` 已弃用，升级到下一个 Notion-Version 前需确认 v2 行为。
